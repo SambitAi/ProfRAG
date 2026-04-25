@@ -1,0 +1,48 @@
+paths:
+  artifacts_root: artifacts
+
+pdf:
+  parser: pymupdf4llm   # options: pymupdf | pymupdf4llm
+
+chunking:
+  chunk_size: 1200
+  chunk_overlap: 50
+  strategy: section_aware   # options: character_count | section_aware
+
+embeddings:
+  provider: openai
+  model: text-embedding-3-small
+  api_base_url: https://api.openai.com/v1
+  http_method: POST
+
+chat:
+  provider: openai
+  model: gpt-4.1-mini
+  temperature: 0
+  api_base_url: https://api.openai.com/v1
+  http_method: POST
+
+vector_db:
+  backend: chroma
+  collection_name: pdf_rag_chunks
+  summary_collection_name: pdf_rag_summaries
+  persist_directory: artifacts/chroma_db
+
+retrieval:
+  top_k: 4
+  expand_parent: true
+  media_top_k: 4
+
+extraction:
+  tables: true
+  images: true
+
+prompt:
+  media_instruction: |
+    When context includes [Table] or [Image] blocks:
+    - Summarise table data in prose, then refer to it as a structured table.
+    - Mention images by caption if available.
+
+summarizer:
+  model: DeepSeek-V3.2        # Azure AI Foundry deployment name — update to match your actual deployment
+  temperature: 0

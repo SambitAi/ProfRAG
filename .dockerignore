@@ -1,0 +1,9 @@
+venvcursor/
+__pycache__/
+*.pyc
+*.pyo
+artifacts/
+chroma_data/
+.env
+graphify-out/
+.git/

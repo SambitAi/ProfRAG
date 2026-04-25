@@ -1,0 +1,14 @@
+streamlit
+openai
+PyMuPDF
+pymupdf4llm
+python-dotenv
+numpy
+chromadb
+PyYAML
+trafilatura
+html2text
+requests
+crawl4ai
+llama-index-core
+llama-index-llms-azure-openai
