@@ -126,11 +126,18 @@ def _run_level3(document_folder: Path, config: dict[str, Any], progress: dict) -
             done_sections.add(h1)
             update_summary_progress(document_folder, "level3_sections_done", list(done_sections))
 
-    max_workers = min(4, len(pending))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_summarize_one, item): item[0] for item in pending}
-        for future in concurrent.futures.as_completed(futures):
-            future.result()
+    try:
+        max_workers = min(4, len(pending))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_summarize_one, item): item[0] for item in pending}
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+    except RuntimeError:
+        # Interpreter shutting down (e.g. Streamlit hot-reload) — executor cannot
+        # accept new tasks. Fall back to sequential in the current daemon thread.
+        for item in pending:
+            if item[0] not in done_sections:
+                _summarize_one(item)
 
     update_summary_progress(document_folder, "level3_complete", True)
 

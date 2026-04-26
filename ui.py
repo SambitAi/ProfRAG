@@ -21,18 +21,39 @@ def initialize_state() -> None:
     st.session_state.setdefault("pending_url", "")
     st.session_state.setdefault("pending_user_choice", "new_version")
     st.session_state.setdefault("url_error", "")
+    # PDF upload processing state (mirrors url_processing pattern)
+    st.session_state.setdefault("pdf_processing", False)
+    st.session_state.setdefault("pending_pdf_name", "")
+    st.session_state.setdefault("pending_pdf_bytes", b"")
+    st.session_state.setdefault("pending_pdf_choice", "new_version")
+    st.session_state.setdefault("pdf_info", "")
     # Multi-doc / routing state
     st.session_state.setdefault("selected_document_folders", [])
     st.session_state.setdefault("chat_mode", "routing")        # "routing" | "deep_search"
     st.session_state.setdefault("active_deep_search_folders", [])
     st.session_state.setdefault("pending_routing_question", "")
     st.session_state.setdefault("routing_candidates", [])
+    # Pane visibility state
+    st.session_state.setdefault("show_doc_pane", True)
+    st.session_state.setdefault("show_summary_pane", True)
+    st.session_state.setdefault("_sum_pane_active_doc", "")
+    st.session_state.setdefault("_sum_pane_active_level", "")
+    # Tracks folders whose summarization daemon was started in this session.
+    # Daemon threads die on process exit, so any "in_progress" not in this
+    # set is stale from a previous session.
+    st.session_state.setdefault("active_summarization_folders", set())
 
 
 def reset_chat() -> None:
     st.session_state["messages"] = []
     st.session_state["routing_candidates"] = []
     st.session_state["pending_routing_question"] = ""
+
+
+def _track_summarization(folder: str) -> None:
+    """Start background summarization and register in the session-level tracking set."""
+    pipeline.start_summarization_background(CONFIG_PATH, folder)
+    st.session_state["active_summarization_folders"].add(str(folder))
 
 
 # ── Pipeline status ──────────────────────────────────────────────────────────
@@ -65,61 +86,147 @@ def render_pipeline_status(metadata: dict, title: str) -> None:
             st.write(f"- `{step_name}`: `{_status_label(metadata, step_name)}`")
 
 
-# ── Summary buttons ──────────────────────────────────────────────────────────
+# ── Summary helpers ───────────────────────────────────────────────────────────
 
-def render_summary_buttons(metadata: dict, document_folder: str) -> None:
-    if not metadata.get("summary_ready"):
-        status = metadata.get("summary_status", "pending")
-        if status == "in_progress":
-            st.caption("⏳ Generating summaries...")
-        elif status == "error":
-            st.caption("❌ Summary generation failed.")
-            if st.button("Retry Summarization", use_container_width=True, key="sum_retry"):
-                pipeline.start_summarization_background(CONFIG_PATH, document_folder)
-                st.rerun()
-        else:
-            if st.button("Generate Summaries", type="primary", use_container_width=True, key="sum_generate"):
-                pipeline.start_summarization_background(CONFIG_PATH, document_folder)
-                st.rerun()
-        return
+def _summary_progress_label(metadata: dict) -> str:
+    p = metadata.get("summary_progress", {})
+    if p.get("level1_indexed"):
+        return "finalizing"
+    if p.get("level1_complete"):
+        return "indexing L1"
+    if p.get("level2_complete"):
+        return "running L1"
+    if p.get("level3_indexed"):
+        return "running L2"
+    if p.get("level3_complete"):
+        return "indexing L3"
+    return "starting"
 
-    summary_paths = metadata.get("summary_paths", {})
-    st.caption("Document Summaries")
-    col1, col2, col3 = st.columns(3)
 
-    with col1:
-        if st.button("1-Pager", use_container_width=True, key="sum_l1"):
-            st.session_state["_show_summary"] = "level1"
-    with col2:
-        if st.button("Medium", use_container_width=True, key="sum_l2"):
-            st.session_state["_show_summary"] = "level2"
-    with col3:
-        if st.button("Detailed", use_container_width=True, key="sum_l3"):
-            st.session_state["_show_summary"] = "level3"
+# ── Summary pane (middle column) ─────────────────────────────────────────────
 
-    level_labels = {"level1": "1-Pager Summary", "level2": "Medium Summary", "level3": "Detailed Summary"}
+_LEVEL_FILES = {
+    "level1": "level1_onepager.json",
+    "level2": "level2_medium.json",
+    "level3": "level3_detailed.json",
+}
+_LEVEL_SHORT = {"level1": "1-Pager", "level2": "Medium", "level3": "Detailed"}
+_LEVEL_LONG  = {"level1": "1-Pager Summary", "level2": "Medium Summary", "level3": "Detailed Summary"}
 
-    show = st.session_state.get("_show_summary")
-    if show and show in summary_paths:
-        path = summary_paths[show]
+
+def render_summary_pane(selected_folders: list[str]) -> None:
+    from core.storage import read_json as _read_json
+
+    # Invisible anchor used by CSS :has(#summary-pane-marker) to colour
+    # this specific stColumn without touching inner button-row columns.
+    st.markdown('<span id="summary-pane-marker"></span>', unsafe_allow_html=True)
+
+    col_title, col_close = st.columns([4, 1])
+    with col_title:
+        st.subheader("Summaries")
+    with col_close:
+        if st.button("◀", key="sum_pane_close", use_container_width=True):
+            st.session_state["show_summary_pane"] = False
+            st.rerun()
+
+    # Clear active selection when its document is no longer selected
+    active_doc   = st.session_state.get("_sum_pane_active_doc", "")
+    active_level = st.session_state.get("_sum_pane_active_level", "")
+    if active_doc and active_doc not in selected_folders:
+        st.session_state["_sum_pane_active_doc"]   = ""
+        st.session_state["_sum_pane_active_level"] = ""
+        active_doc = active_level = ""
+
+    st.divider()
+
+    if not selected_folders:
+        st.caption("Select documents from the left panel to view their summaries here.")
+
+    for folder in selected_folders:
+        metadata   = pipeline.load_document(folder)
+        doc_name   = metadata.get("document_name", Path(folder).name)
+        status     = metadata.get("summary_status", "pending")
+        sum_ready  = metadata.get("summary_ready", False)
+        folder_slug = Path(folder).name
+        summaries_dir = Path(folder) / "summaries"
+        available  = {k for k, f in _LEVEL_FILES.items() if (summaries_dir / f).exists()}
+
+        st.markdown(f"**{doc_name}**")
+
+        # Status / generate controls
+        if not sum_ready:
+            if status == "in_progress":
+                st.caption(f"⏳ {_summary_progress_label(metadata)}")
+                if st.button("Restart", key=f"sp_restart_{folder_slug}", use_container_width=True):
+                    _track_summarization(folder)
+                    st.rerun()
+            elif status == "error":
+                st.caption("❌ Generation failed")
+                if st.button("Retry", key=f"sp_retry_{folder_slug}", use_container_width=True):
+                    _track_summarization(folder)
+                    st.rerun()
+            elif not available:
+                if st.button("Generate Summaries", type="primary",
+                             key=f"sp_gen_{folder_slug}", use_container_width=True):
+                    _track_summarization(folder)
+                    st.rerun()
+
+        # Level buttons (disabled when file not yet generated)
+        if available or sum_ready:
+            c1, c2, c3 = st.columns(3)
+            for level_key, col in [("level1", c1), ("level2", c2), ("level3", c3)]:
+                is_active = (active_doc == folder and active_level == level_key)
+                btn_key   = f"sp_btn_{level_key}_{folder_slug}"
+                with col:
+                    if level_key in available:
+                        btype = "primary" if is_active else "secondary"
+                        if st.button(_LEVEL_SHORT[level_key], key=btn_key,
+                                     use_container_width=True, type=btype):
+                            if is_active:
+                                st.session_state["_sum_pane_active_doc"]   = ""
+                                st.session_state["_sum_pane_active_level"] = ""
+                            else:
+                                st.session_state["_sum_pane_active_doc"]   = folder
+                                st.session_state["_sum_pane_active_level"] = level_key
+                            st.rerun()
+                    else:
+                        st.button(_LEVEL_SHORT[level_key], key=btn_key,
+                                  use_container_width=True, disabled=True)
+
+        st.divider()
+
+    # ── Shared summary content area (bottom, collapsible) ────────────────────
+    active_doc   = st.session_state.get("_sum_pane_active_doc", "")
+    active_level = st.session_state.get("_sum_pane_active_level", "")
+
+    if active_doc and active_level:
+        summaries_dir = Path(active_doc) / "summaries"
         data = {}
         try:
-            from core.storage import read_json
-            data = read_json(path, default={})
+            data = _read_json(str(summaries_dir / _LEVEL_FILES[active_level]), default={})
         except Exception:
             pass
-        label = level_labels.get(show, show)
-        with st.expander(label, expanded=True):
-            if show == "level3":
-                sections = data.get("sections", [])
-                for sec in sections:
+
+        doc_name = pipeline.load_document(active_doc).get("document_name", Path(active_doc).name)
+        with st.expander(f"{_LEVEL_LONG[active_level]} — {doc_name}", expanded=True):
+            if active_level == "level3":
+                for sec in data.get("sections", []):
                     st.markdown(f"**{sec.get('section', '')}**")
                     st.markdown(sec.get("summary", ""))
             else:
                 st.markdown(data.get("summary", "No summary available."))
 
+            if st.button("↻ Regenerate this level",
+                         key=f"sp_regen_{Path(active_doc).name}_{active_level}",
+                         use_container_width=True):
+                pipeline.reset_summary_level(CONFIG_PATH, active_doc, active_level)
+                st.session_state["active_summarization_folders"].add(str(active_doc))
+                st.session_state["_sum_pane_active_doc"]   = ""
+                st.session_state["_sum_pane_active_level"] = ""
+                st.rerun()
 
-# ── Sidebar: existing documents ──────────────────────────────────────────────
+
+# ── Left panel: existing documents ───────────────────────────────────────────
 
 def render_existing_documents() -> None:
     documents = pipeline.list_documents(CONFIG_PATH)
@@ -174,16 +281,54 @@ def render_existing_documents() -> None:
     if selected:
         st.caption(f"{len(selected)} document(s) selected")
 
-    # ── Summary buttons for single selected doc ──────────────────────────────
+    # Pipeline status for single selected doc
     if len(selected) == 1:
         doc_meta = pipeline.load_document(selected[0])
         render_pipeline_status(doc_meta, "Pipeline status")
-        render_summary_buttons(doc_meta, selected[0])
 
 
 # ── Sidebar: document ingest ─────────────────────────────────────────────────
 
 def render_upload_panel() -> None:
+    if st.session_state["pdf_processing"]:
+        st.file_uploader(
+            "Upload a PDF", type=["pdf"], accept_multiple_files=False,
+            key="pdf_uploader_processing", disabled=True,
+        )
+        st.button("Processing...", disabled=True, use_container_width=True, key="pdf_btn_proc")
+        with st.spinner("Running document pipeline..."):
+            try:
+                metadata = pipeline.prepare_document(
+                    config_path=CONFIG_PATH,
+                    file_name=st.session_state["pending_pdf_name"],
+                    file_bytes=st.session_state["pending_pdf_bytes"],
+                    user_choice=st.session_state["pending_pdf_choice"],
+                )
+                if metadata.get("summary_status") == "in_progress":
+                    st.session_state["active_summarization_folders"].add(
+                        metadata.get("document_folder", "")
+                    )
+                reset_chat()
+                if metadata.get("ready_to_chat"):
+                    st.toast(f"`{metadata['document_name']}` is ready!")
+                else:
+                    st.session_state["pdf_info"] = (
+                        f"`{metadata['document_name']}` resumed to step "
+                        f"`{metadata.get('last_successful_step', 'unknown')}`."
+                    )
+            finally:
+                st.session_state["pdf_processing"] = False
+                st.session_state["pending_pdf_name"] = ""
+                st.session_state["pending_pdf_bytes"] = b""
+                st.session_state["pending_pdf_choice"] = "new_version"
+                st.session_state["upload_key"] += 1
+        st.rerun()
+        return
+
+    if st.session_state["pdf_info"]:
+        st.info(st.session_state["pdf_info"])
+        st.session_state["pdf_info"] = ""
+
     uploaded_file = st.file_uploader(
         "Upload a PDF", type=["pdf"], accept_multiple_files=False,
         key=f"pdf_uploader_{st.session_state['upload_key']}",
@@ -211,23 +356,11 @@ def render_upload_panel() -> None:
         user_choice = "reuse"
 
     if st.button("Process uploaded PDF", use_container_width=True):
-        with st.spinner("Running document pipeline and generating summaries..."):
-            metadata = pipeline.prepare_document(
-                config_path=CONFIG_PATH,
-                file_name=uploaded_file.name,
-                file_bytes=uploaded_file.getvalue(),
-                user_choice=user_choice,
-            )
-        reset_chat()
-        if metadata.get("ready_to_chat"):
-            st.toast(f"`{metadata['document_name']}` is ready!")
-            st.session_state["upload_key"] += 1
-            st.rerun()
-        else:
-            st.warning(
-                f"`{metadata['document_name']}` resumed to step "
-                f"`{metadata.get('last_successful_step', 'unknown')}`."
-            )
+        st.session_state["pending_pdf_name"] = uploaded_file.name
+        st.session_state["pending_pdf_bytes"] = uploaded_file.getvalue()
+        st.session_state["pending_pdf_choice"] = user_choice
+        st.session_state["pdf_processing"] = True
+        st.rerun()
 
 
 def render_url_panel() -> None:
@@ -247,6 +380,10 @@ def render_url_panel() -> None:
                     st.session_state["pending_url"],
                     st.session_state["pending_user_choice"],
                 )
+                if metadata.get("summary_status") == "in_progress":
+                    st.session_state["active_summarization_folders"].add(
+                        metadata.get("document_folder", "")
+                    )
                 st.session_state["url_input_key"] += 1
                 reset_chat()
                 if metadata.get("ready_to_chat"):
@@ -379,12 +516,10 @@ def render_chat() -> None:
     chat_mode = st.session_state.get("chat_mode", "routing")
     active_folders = st.session_state.get("active_deep_search_folders", [])
 
-    # ── Single document: existing behavior + summary buttons in sidebar ──────
     if len(selected_folders) == 1:
         _render_single_doc_chat(selected_folders[0])
         return
 
-    # ── Multiple docs selected directly in sidebar: direct multi-doc mode ────
     if len(selected_folders) > 1:
         _render_direct_multi_doc_chat(selected_folders)
         return
@@ -497,7 +632,7 @@ def _render_routing_chat() -> None:
     if not candidates:
         msg = (
             "No relevant documents found. Make sure documents have been summarized, "
-            "or select documents manually in the sidebar."
+            "or select documents manually in the left panel."
         )
         st.session_state["messages"].append({"role": "assistant", "content": msg})
         st.session_state["pending_routing_question"] = ""
@@ -586,39 +721,207 @@ def _process_multi_doc_question(question: str, document_folders: list[str]) -> N
 
 # ── App entry point ──────────────────────────────────────────────────────────
 
-_SIDEBAR_CSS = """
+_NAVBAR_HTML = (
+    '<div class="profrag-navbar">'
+    '<span class="profrag-navbar-title">📄 ProfRAG</span>'
+    "</div>"
+)
+
+_APP_CSS = """
 <style>
-[data-testid="stSidebar"] {
-    min-width: 420px;
-    max-width: 420px;
+/* ── Navbar ──────────────────────────────────────────────────────────────── */
+.profrag-navbar {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 52px;
+    z-index: 999999;
+    background: linear-gradient(90deg, #1a3558 0%, #2563a8 100%);
+    display: flex;
+    align-items: center;
+    padding: 0 1.5rem;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.25);
+}
+.profrag-navbar-title {
+    color: #ffffff;
+    font-size: 1.45rem;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+
+/* ── Main layout ─────────────────────────────────────────────────────────── */
+[data-testid="stMainBlockContainer"],
+.block-container {
+    padding-left:  0 !important;
+    padding-right: 0 !important;
+    padding-top:   52px !important;
+    max-width:     100% !important;
+}
+section[data-testid="stMain"] {
+    background-color: #edf4fc !important;
+}
+
+/* ── Open pane columns — independently scrollable ────────────────────────── */
+[data-testid="stColumn"]:has(#doc-col-marker) {
+    background-color: #b8d0eb !important;
+    border-right:     2px solid #6fa3d8 !important;
+    height:           calc(100vh - 52px);
+    overflow-y:       auto;
+    overflow-x:       hidden;
+}
+[data-testid="stColumn"]:has(#summary-pane-marker) {
+    background-color: #d4e8f8 !important;
+    border-right:     2px solid #6fa3d8 !important;
+    height:           calc(100vh - 52px);
+    overflow-y:       auto;
+    overflow-x:       hidden;
+}
+[data-testid="stColumn"]:has(#chat-col-marker) {
+    height:           calc(100vh - 52px);
+    overflow-y:       auto;
+    overflow-x:       hidden;
+}
+
+/* ── Collapsed pane tabs (narrow expand strips) ──────────────────────────── */
+[data-testid="stColumn"]:has(#doc-tab-marker),
+[data-testid="stColumn"]:has(#sum-tab-marker) {
+    height:   calc(100vh - 52px);
+    overflow: hidden;
+    cursor:   pointer;
+}
+[data-testid="stColumn"]:has(#doc-tab-marker) {
+    background-color: #b8d0eb !important;
+    border-right:     2px solid #6fa3d8 !important;
+}
+[data-testid="stColumn"]:has(#sum-tab-marker) {
+    background-color: #d4e8f8 !important;
+    border-right:     2px solid #6fa3d8 !important;
+}
+/* Strip default vertical-block padding so button fills the narrow column */
+[data-testid="stColumn"]:has(#doc-tab-marker) [data-testid="stVerticalBlock"],
+[data-testid="stColumn"]:has(#sum-tab-marker) [data-testid="stVerticalBlock"] {
+    padding: 0 !important;
+    gap:     0 !important;
+}
+/* Expand-arrow button style */
+[data-testid="stColumn"]:has(#doc-tab-marker) button,
+[data-testid="stColumn"]:has(#sum-tab-marker) button {
+    background:  transparent !important;
+    border:      none !important;
+    box-shadow:  none !important;
+    color:       #1a3558 !important;
+    font-size:   1.2rem !important;
+    font-weight: 900 !important;
+    min-height:  64px !important;
+    width:       100% !important;
+    padding:     10px 0 !important;
+}
+[data-testid="stColumn"]:has(#doc-tab-marker) button:hover,
+[data-testid="stColumn"]:has(#sum-tab-marker) button:hover {
+    background: rgba(26, 53, 88, 0.14) !important;
+    color:      #2563a8 !important;
+}
+
+/* ── Responsive — tablet (≤ 1024px) ─────────────────────────────────────── */
+@media (max-width: 1024px) {
+    .profrag-navbar-title { font-size: 1.25rem; }
+}
+
+/* ── Responsive — mobile (≤ 768px) ──────────────────────────────────────── */
+@media (max-width: 768px) {
+    .profrag-navbar-title { font-size: 1rem; letter-spacing: 0.05em; }
+    [data-testid="stHorizontalBlock"]:has(#chat-col-marker) {
+        flex-wrap: wrap !important;
+    }
+    [data-testid="stColumn"]:has(#doc-col-marker),
+    [data-testid="stColumn"]:has(#doc-tab-marker),
+    [data-testid="stColumn"]:has(#summary-pane-marker),
+    [data-testid="stColumn"]:has(#sum-tab-marker),
+    [data-testid="stColumn"]:has(#chat-col-marker) {
+        min-width:    100% !important;
+        width:        100% !important;
+        height:       auto !important;
+        max-height:   55vh;
+        border-right: none !important;
+        border-bottom: 2px solid #6fa3d8;
+    }
 }
 </style>
 """
 
 
 def main() -> None:
-    st.set_page_config(page_title="MultiModalRAG", page_icon="📄", layout="wide")
-    st.markdown(_SIDEBAR_CSS, unsafe_allow_html=True)
+    st.set_page_config(page_title="ProfRAG", page_icon="📄", layout="wide")
+    st.markdown(_APP_CSS, unsafe_allow_html=True)
+    st.markdown(_NAVBAR_HTML, unsafe_allow_html=True)
     initialize_state()
 
-    st.title("Persistent PDF RAG")
-    st.caption("Select documents from the sidebar or ask a question to find relevant documents automatically.")
+    show_doc = st.session_state.get("show_doc_pane", True)
+    show_sum = st.session_state.get("show_summary_pane", True)
 
-    with st.sidebar:
-        st.subheader("Documents")
-        render_existing_documents()
-        st.divider()
-        st.subheader("Add Document")
-        render_ingest_panel()
+    doc_col = sum_col = doc_tab = sum_tab = None
 
-    render_chat()
+    # Four layout states — each pane is independent of the other
+    if show_doc and show_sum:
+        doc_col, sum_col, chat_col = st.columns([20, 30, 50])
+    elif show_doc:                  # summary pane collapsed → narrow tab
+        doc_col, sum_tab, chat_col = st.columns([20, 3, 77])
+    elif show_sum:                  # doc pane collapsed → narrow tab
+        doc_tab, sum_col, chat_col = st.columns([3, 30, 67])
+    else:                           # both panes collapsed
+        doc_tab, sum_tab, chat_col = st.columns([3, 3, 94])
 
-    # Auto-refresh sidebar while any document is generating summaries in background
-    docs = pipeline.list_documents(CONFIG_PATH)
-    if any(d.get("summary_status") == "in_progress" for d in docs):
-        import time
-        time.sleep(3)
-        st.rerun()
+    # ── Collapsed doc tab ────────────────────────────────────────────────────
+    if doc_tab is not None:
+        with doc_tab:
+            st.markdown('<span id="doc-tab-marker"></span>', unsafe_allow_html=True)
+            if st.button("▶", key="doc_expand", use_container_width=True,
+                         help="Expand Documents"):
+                st.session_state["show_doc_pane"] = True
+                st.rerun()
+
+    # ── Open doc pane ────────────────────────────────────────────────────────
+    # Rendered first so render_existing_documents() writes the current checkbox
+    # state into selected_document_folders before the summary pane reads it.
+    if doc_col is not None:
+        with doc_col:
+            st.markdown('<span id="doc-col-marker"></span>', unsafe_allow_html=True)
+            _, coll_col = st.columns([6, 1])
+            with coll_col:
+                if st.button("◀", key="doc_collapse", use_container_width=True,
+                             help="Collapse Documents"):
+                    st.session_state["show_doc_pane"] = False
+                    st.rerun()
+            st.subheader("Documents")
+            render_existing_documents()
+            st.divider()
+            st.subheader("Add Document")
+            render_ingest_panel()
+
+    # Read selection AFTER render_existing_documents() has updated session state
+    # so the summary pane and chat see the current checkbox values, not last frame's.
+    selected = st.session_state.get("selected_document_folders", [])
+
+    # ── Collapsed sum tab ────────────────────────────────────────────────────
+    if sum_tab is not None:
+        with sum_tab:
+            st.markdown('<span id="sum-tab-marker"></span>', unsafe_allow_html=True)
+            if st.button("▶", key="sum_expand", use_container_width=True,
+                         help="Expand Summaries"):
+                st.session_state["show_summary_pane"] = True
+                st.rerun()
+
+    # ── Open summary pane ────────────────────────────────────────────────────
+    if sum_col is not None:
+        with sum_col:
+            render_summary_pane(selected)
+
+    # ── Chat column (always visible) ─────────────────────────────────────────
+    with chat_col:
+        st.markdown('<span id="chat-col-marker"></span>', unsafe_allow_html=True)
+        st.caption("Select documents from the left panel or ask a question to find relevant documents automatically.")
+        render_chat()
 
 
 if __name__ == "__main__":

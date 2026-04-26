@@ -43,12 +43,11 @@ def find_relevant_documents(question: str, config: dict[str, Any]) -> list[dict[
         logger.warning("Summary collection '%s' not found — no summaries indexed yet.", collection_name)
         return []
 
-    resp = client.embeddings.create(model=embedding_model, input=[question])
-    query_embedding = resp.data[0].embedding
-
     # ── Stage 1: Level 1 filter — top-20 unique documents ───────────────────
     stage1_folders: list[str] = []
     try:
+        resp = client.embeddings.create(model=embedding_model, input=[question])
+        query_embedding = resp.data[0].embedding
         result = collection.query(
             query_embeddings=[query_embedding],
             n_results=20,
@@ -122,16 +121,71 @@ def find_relevant_documents(question: str, config: dict[str, Any]) -> list[dict[
     return candidates
 
 
+def _score_folders_by_summary(
+    question: str,
+    document_folders: list[str],
+    config: dict[str, Any],
+) -> list[str]:
+    """Return document_folders ranked by L1 summary relevance to the question.
+
+    Folders whose L1 summary is not yet indexed are appended at the end unranked.
+    On any error the original list is returned unchanged.
+    """
+    if len(document_folders) <= 1:
+        return document_folders
+
+    try:
+        client = get_openai_client()
+        embedding_model = config["embeddings"]["model"]
+        collection_name = config["vector_db"].get("summary_collection_name", "pdf_rag_summaries")
+        chroma_client = _get_chroma_client(config)
+        collection = chroma_client.get_collection(name=collection_name)
+
+        resp = client.embeddings.create(model=embedding_model, input=[question])
+        query_embedding = resp.data[0].embedding
+
+        where_filter: dict[str, Any] = {"$and": [
+            {"level": {"$eq": "1"}},
+            {"document_folder": {"$in": document_folders}},
+        ]}
+
+        result = collection.query(
+            query_embeddings=[query_embedding],
+            n_results=min(len(document_folders), 50),
+            where=where_filter,
+        )
+        metas = (result.get("metadatas") or [[]])[0]
+        distances = (result.get("distances") or [[]])[0]
+
+        scored: dict[str, float] = {}
+        for meta, dist in zip(metas, distances):
+            folder = meta.get("document_folder", "")
+            if folder and folder not in scored:
+                scored[folder] = 1.0 - float(dist)
+
+        ranked = sorted(scored, key=lambda f: scored[f], reverse=True)
+        unranked = [f for f in document_folders if f not in scored]
+        return ranked + unranked
+
+    except Exception:
+        logger.warning("Summary scoring failed — using original folder order.")
+        return document_folders
+
+
 def ask_across_documents(
     question: str,
     document_folders: list[str],
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Stage 3: retrieve real chunks from confirmed documents, generate answer with LLM.
+    """Retrieve real chunks from the most relevant documents and generate an answer.
 
-    The LLM context contains only real document chunks — no summaries.
+    Documents are pre-filtered and ranked by L1 summary similarity before chunk
+    retrieval, so only the top-N relevant docs consume LLM context.
     Sources include doc name, section, chunk number, and a text snippet for UI display.
     """
+    max_docs = config.get("retrieval", {}).get("multi_doc_max_docs", 5)
+    document_folders = _score_folders_by_summary(question, document_folders, config)[:max_docs]
+
     client = get_openai_client()
     all_context_blocks: list[str] = []
     all_sources: list[dict[str, Any]] = []
@@ -168,7 +222,7 @@ def ask_across_documents(
         texts = payload.get("documents", [])
         metas = payload.get("metadatas", [])
 
-        for i, (text, meta) in enumerate(zip(texts, metas), 1):
+        for text, meta in zip(texts, metas):
             section_path = meta.get("section_path", "")
             chunk_num = meta.get("chunk_number", "?")
             label = f"{doc_name} > {section_path}" if section_path else f"{doc_name}, Chunk {chunk_num}"

@@ -156,6 +156,9 @@ def _run_pipeline_from_metadata(config_path: str | Path, document_folder: str | 
 
     if last_step == "markdown_chunker":
         metadata = load_metadata(document_folder)
+        # Start summarization before vectorisation — both only need chunk_paths,
+        # so the daemon runs concurrently while write_to_vector_db blocks.
+        start_summarization_background(config_path, document_folder)
         write_to_vector_db.run(
             chunk_paths=metadata["chunk_paths"],
             document_folder=document_folder,
@@ -164,11 +167,15 @@ def _run_pipeline_from_metadata(config_path: str | Path, document_folder: str | 
             embedding_model=config["embeddings"]["model"],
             index_result_path=outputs["vector_result"],
         )
+        return load_metadata(document_folder)
 
-    # ── Summarization: non-blocking — doc is already ready_to_chat after vectorize ──
-    start_summarization_background(config_path, document_folder)
-
-    return load_metadata(document_folder)
+    # Reached when the document was already vectorised but summarisation is incomplete.
+    # Always restart: the daemon may have been killed (status stays "in_progress" on restart)
+    # and summarize_document.run() is idempotent — it skips already-completed checkpoints.
+    final_metadata = load_metadata(document_folder)
+    if not final_metadata.get("summary_ready"):
+        start_summarization_background(config_path, document_folder)
+    return final_metadata
 
 
 def prepare_document(
@@ -182,6 +189,7 @@ def prepare_document(
     ensure_directory(artifacts_root)
     existing_folder = _find_latest_same_name_document(artifacts_root, file_name)
 
+    version = None
     if existing_folder is not None:
         existing_metadata = load_metadata(existing_folder)
         if existing_metadata.get("ready_to_chat") and user_choice == "reuse":
@@ -190,10 +198,6 @@ def prepare_document(
             return existing_metadata
         if not existing_metadata.get("ready_to_chat"):
             return _run_pipeline_from_metadata(config_path, existing_folder)
-
-    version = None
-    if existing_folder is not None:
-        existing_metadata = load_metadata(existing_folder)
         version = int(existing_metadata["document_version"]) + 1
 
     document_folder = pdf_upload.save_uploaded_pdf(
@@ -276,14 +280,6 @@ def ask_multi_document_question(
     return multi_doc_query.ask_across_documents(question, document_folders, config)
 
 
-def run_summarization(config_path: str | Path, document_folder: str | Path) -> dict[str, Any]:
-    """Blocking summarization — use only for testing or CLI use."""
-    config = _config(config_path)
-    from services import summarize_document
-    summarize_document.run(document_folder, config)
-    return load_metadata(document_folder)
-
-
 def start_summarization_background(config_path: str | Path, document_folder: str | Path) -> None:
     """Non-blocking: marks in_progress and spawns a daemon thread for summarization."""
     import threading
@@ -300,6 +296,39 @@ def start_summarization_background(config_path: str | Path, document_folder: str
             pass  # errors are written to metadata by summarize_document.run()
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+def reset_summary_level(config_path: str | Path, document_folder: str | Path, level: str) -> None:
+    """Clear checkpoints for *level* and all downstream levels, then restart summarization.
+
+    level: "level1" | "level2" | "level3"
+    Regenerating a level invalidates everything that was derived from it.
+    """
+    from core.metadata import load_metadata, save_metadata
+    from core.storage import write_json
+
+    folder = Path(document_folder)
+    metadata = load_metadata(folder)
+    progress = metadata.setdefault("summary_progress", {})
+
+    _downstream: dict[str, list[str]] = {
+        "level3": ["level3_sections_done", "level3_complete", "level3_indexed",
+                   "level2_complete", "level1_complete", "level1_indexed"],
+        "level2": ["level2_complete", "level1_complete", "level1_indexed"],
+        "level1": ["level1_complete", "level1_indexed"],
+    }
+    for key in _downstream.get(level, []):
+        progress.pop(key, None)
+
+    metadata["summary_ready"] = False
+    metadata["summary_status"] = "pending"
+    save_metadata(folder, metadata)
+
+    # Reset L3 file to empty so sections don't accumulate duplicates on re-run
+    if level == "level3":
+        write_json(folder / "summaries" / "level3_detailed.json", {"sections": []})
+
+    start_summarization_background(config_path, folder)
 
 
 def ask_question(config_path: str | Path, document_folder: str | Path, question: str) -> dict[str, Any]:

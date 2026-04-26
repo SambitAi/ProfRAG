@@ -32,6 +32,7 @@ retrieval:
   top_k: 4
   expand_parent: true
   media_top_k: 4
+  multi_doc_max_docs: 5
 
 extraction:
   tables: true

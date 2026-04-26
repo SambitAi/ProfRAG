@@ -1,6 +1,6 @@
 # Persistent PDF RAG
 
-Chat with any PDF using a fully persistent, multimodal RAG pipeline — text, tables, images, and formulas all retrieved and rendered.
+Chat with any PDF or web page using a fully persistent, multimodal RAG pipeline — text, tables, and images all retrieved and rendered. Query a single document or ask questions across your entire library at once.
 
 Every pipeline step is saved to disk. If processing fails mid-way, the next run resumes from the last successful step. Multiple versions of the same document are tracked independently.
 
@@ -8,12 +8,14 @@ Every pipeline step is saved to disk. If processing fails mid-way, the next run 
 
 ## What it does
 
-- **Upload PDFs** via a Streamlit web UI
-- **Extract everything** — text, embedded images (with OCR captions), markdown tables (converted to CSV), and mathematical formulas
+- **Upload PDFs or paste a URL** via a Streamlit web UI — web pages are scraped to markdown automatically
+- **Extract everything** — text, embedded images (with OCR captions), and markdown tables (converted to CSV)
 - **Section-aware chunking** — respects H1/H2/H3 heading hierarchy so chunks stay semantically coherent
-- **Multimodal retrieval** — semantic search over text chunks *and* images/tables/formulas separately, then merged into a single prompt
+- **Multimodal retrieval** — semantic search over text chunks *and* images/tables separately, then merged into a single prompt
+- **3-level summarization** — every document gets a per-section summary (L3), a structured medium summary (L2), and a 250-word executive summary (L1), all indexed for fast cross-document routing
+- **Multi-document querying** — ask one question across your whole library; a 3-stage semantic funnel picks the most relevant documents before retrieving real chunks
 - **Persistent artifacts** — every intermediate file is saved; re-opening a processed document skips straight to chat
-- **Document versioning** — uploading the same filename again creates a new versioned folder (`_v2`, `_v3`, …) or resumes an incomplete run
+- **Document versioning** — uploading the same filename or URL again creates a new versioned folder (`_v2`, `_v3`, …) or resumes an incomplete run
 - **Configurable** — swap PDF parser, chunking strategy, models, retrieval depth all via one YAML file
 
 ---
@@ -21,19 +23,34 @@ Every pipeline step is saved to disk. If processing fails mid-way, the next run 
 ## Pipeline
 
 ```
-PDF Upload
-  ↓
-pdf_to_markdown_pymupdf4llm     ← layout-aware text + image extraction
-  ↓           ↓           ↓
-extract_images  extract_tables  extract_formulas    ← parallel asset indexing
-  ↓
-markdown_chunker_section_aware  ← H1/H2/H3 hierarchy preserved
-  ↓
-write_to_vector_db              ← OpenAI embeddings → ChromaDB (text + media)
-  ↓ (per user question)
-retrieve_context                ← semantic search: top-k text + top-k media
-  ↓
-chat_response                   ← GPT answer with cited sources + inline images
+PDF Upload  ─────────────────────────────────────────────────────┐
+                                                                  │
+URL / Web Page ──► scrape_url_to_markdown                        │
+                         │                                        │
+                         ▼                                        ▼
+               pdf_to_markdown_pymupdf4llm     ← layout-aware text + image extraction
+                   ↓           ↓
+             extract_images  extract_tables    ← parallel asset indexing
+                   ↓
+         markdown_chunker_section_aware        ← H1/H2/H3 hierarchy preserved
+                   ↓
+           write_to_vector_db                  ← OpenAI embeddings → ChromaDB (text + media)
+                   ↓
+           summarize_document                  ← L3 per-section → L2 medium → L1 exec summary
+                   ↓                               (each level indexed in pdf_rag_summaries)
+            ┌──────────────────────────────┐
+            │  per user question           │
+            └──────────────────────────────┘
+                   ↓
+           retrieve_context                    ← semantic search: top-k text + top-k media
+                   ↓
+           chat_response                       ← GPT answer with cited sources + inline images
+
+  ── or ──
+
+           multi_doc_query                     ← L1 summary filter → L3 section confirm
+                   ↓                               → real chunk retrieval across N documents
+           chat_response (cross-document)      ← per-document citations, then aggregate answer
 ```
 
 Each stage writes its outputs to `artifacts/{document}_v{N}/` and records its status in `metadata.json`. The pipeline picks up from `last_successful_step` on any restart.
@@ -45,32 +62,36 @@ Each stage writes its outputs to `artifacts/{document}_v{N}/` and records its st
 ```
 artifacts/
   my_report_v1/
-    metadata.json          # pipeline state, chunk paths, step statuses
+    metadata.json          # pipeline state, chunk paths, step statuses, summary progress
     source/
       my_report.pdf
     markdown/
-      document.md
+      document.md          # also written here for URL-ingested web pages
     images/
       *_page_N_img_M.png
       index.json           # caption, title, page, prev/next context per image
     tables/
       *_table_N.csv
       index.json           # title, headers, caption, prev/next context per table
-    formulas/
-      *_formula_N.txt
-      index.json           # prev/next context per formula block
     chunks/
-      *_chunk_000001.json  # text, section_path, image_paths, table_paths, formula_paths
+      *_chunk_000001.json  # text, section_path, image_paths, table_paths
       ...
     sections/
       {h1_slug}.json       # section-level asset registry for parent expansion
+    summaries/
+      level3_detailed.json # per-H1 section summaries (parallel, resumable)
+      level2_medium.json   # 4-6 paragraph structured summary
+      level1_onepager.json # 250-word executive summary
     vector/
       index_result.json
     retrieval/
       query_000001.json
+      multidoc_000001.json # written during cross-document queries
     chat/
       query_000001.json
-  chroma_db/               # shared ChromaDB store for all documents
+  chroma_db/               # shared ChromaDB store — two collections:
+    pdf_rag_chunks         #   chunk embeddings (text + media, filtered by document_folder)
+    pdf_rag_summaries      #   L1 + L3 summary embeddings for multi-doc routing
 ```
 
 ---
@@ -79,6 +100,7 @@ artifacts/
 
 - Python 3.10+
 - An **OpenAI API key** *or* **Azure OpenAI** credentials (key + endpoint)
+- *(Optional)* An **Azure AI Foundry** deployment for the summarizer model (e.g. DeepSeek-V3.2)
 
 ---
 
@@ -134,11 +156,13 @@ The app auto-detects Azure vs OpenAI: if `AZURE_OPENAI_API_KEY` and `AZURE_OPENA
 | `embeddings.model` | `text-embedding-3-small` | OpenAI model name or Azure deployment name |
 | `chat.model` | `gpt-4.1-mini` | OpenAI model name or Azure deployment name |
 | `retrieval.top_k` | `4` | Text chunks returned per query |
-| `retrieval.media_top_k` | `4` | Images/tables/formulas returned per query |
+| `retrieval.media_top_k` | `4` | Images/tables returned per query |
 | `retrieval.expand_parent` | `true` | Also retrieve sibling assets from the same H1 section |
 | `extraction.images` | `true` | Enable/disable image extraction |
 | `extraction.tables` | `true` | Enable/disable table extraction |
-| `extraction.formulas` | `true` | Enable/disable formula extraction |
+| `summarizer.model` | `DeepSeek-V3.2` | Model/deployment used for L1–L3 summarization; can differ from `chat.model` |
+| `vector_db.collection_name` | `pdf_rag_chunks` | ChromaDB collection for chunk embeddings |
+| `vector_db.summary_collection_name` | `pdf_rag_summaries` | ChromaDB collection for summary embeddings (multi-doc routing) |
 | `prompt.media_instruction` | *(see yaml)* | Injected into every LLM system prompt |
 
 ---
@@ -152,8 +176,10 @@ See [Docker section](#docker) below — two containers, one for the app and one 
 ## Limitations
 
 - **Scanned PDFs** — OCR runs via `pymupdf4llm` on a best-effort basis; heavily image-based PDFs may produce sparse text
-- **Single Chroma collection** — all documents share one ChromaDB collection, filtered by `document_folder` at query time; very large deployments (100+ large PDFs) may benefit from per-document collections
+- **URL scraping** — Crawl4AI (primary) handles JS-heavy pages; trafilatura and html2text are used as fallbacks. Some paywalled or heavily obfuscated sites may still return sparse content
+- **Single Chroma collection per type** — all documents share one chunk collection and one summary collection, filtered by `document_folder` at query time; very large deployments (100+ large PDFs) may benefit from per-document collections
 - **Synchronous processing** — PDF upload blocks the Streamlit UI while the pipeline runs; for multi-user production use, move processing to a background worker
+- **Summarizer model** — the default `summarizer.model` is an Azure AI Foundry deployment name; update it to match your actual deployment or any OpenAI-compatible model
 - **No authentication** — the app is designed for local or single-tenant use; add a reverse proxy with auth before exposing publicly
 
 ---
@@ -179,7 +205,9 @@ Two containers communicate over a Docker network. ChromaDB runs as an HTTP serve
 | Stage | Type | Mitigation |
 |---|---|---|
 | PDF → Markdown | CPU-bound | No easy mitigation; use `pymupdf` parser for speed at the cost of images |
+| URL scraping | Network | Crawl4AI uses a headless browser; set `headless=True` (default) and expect ~2–5 s per page |
 | Embedding API calls | Network | Batch size limited by OpenAI rate limits; increase `chunk_size` to reduce chunk count |
+| Summarization API calls | Network | L3 runs up to 4 sections in parallel; uses `summarizer.model` which can be a cheaper/faster deployment |
 | ChromaDB write | Disk I/O | Mount `./chroma_data` on SSD; separate container keeps index in RAM |
 | ChromaDB query | Memory | `mem_limit: 1g` on chromadb container keeps HNSW index hot |
 | LLM response | Network | Use `gpt-4o-mini` or `gpt-4.1-mini` for faster, cheaper responses |
