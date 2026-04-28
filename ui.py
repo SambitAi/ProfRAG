@@ -36,6 +36,11 @@ def initialize_state() -> None:
     # Pane visibility state
     st.session_state.setdefault("show_doc_pane", True)
     st.session_state.setdefault("show_summary_pane", True)
+    # Action bar panel toggles
+    st.session_state.setdefault("show_pdf_panel", False)
+    st.session_state.setdefault("show_url_panel", False)
+    st.session_state.setdefault("show_add_dropdown", False)
+    st.session_state.setdefault("_bar_question", "")
     st.session_state.setdefault("_sum_pane_active_doc", "")
     st.session_state.setdefault("_sum_pane_active_level", "")
     # Tracks folders whose summarization daemon was started in this session.
@@ -123,6 +128,7 @@ def render_summary_pane(selected_folders: list[str]) -> None:
 
     col_title, col_close = st.columns([4, 1])
     with col_title:
+        st.markdown('<span id="sum-close-sticky-marker"></span>', unsafe_allow_html=True)
         st.subheader("Summaries")
     with col_close:
         if st.button("◀", key="sum_pane_close", use_container_width=True):
@@ -156,7 +162,11 @@ def render_summary_pane(selected_folders: list[str]) -> None:
         # Status / generate controls
         if not sum_ready:
             if status == "in_progress":
-                st.caption(f"⏳ {_summary_progress_label(metadata)}")
+                label = _summary_progress_label(metadata)
+                st.markdown(
+                    f'<span class="summary-progress-badge">⟳ {label}</span>',
+                    unsafe_allow_html=True,
+                )
                 if st.button("Restart", key=f"sp_restart_{folder_slug}", use_container_width=True):
                     _track_summarization(folder)
                     st.rerun()
@@ -252,25 +262,63 @@ def render_existing_documents() -> None:
             reset_chat()
             st.rerun()
 
-    # ── Checkbox list ────────────────────────────────────────────────────────
-    for doc in documents:
-        key = f"doc_chk_{doc['folder_name']}"
-        st.session_state.setdefault(key, False)
+    # ── Search + scrollable list ─────────────────────────────────────────────
+    with st.container(height=320, border=False):
+        search = st.text_input(
+            "Search",
+            placeholder="Filter documents...",
+            key="doc_search",
+            label_visibility="collapsed",
+        ).strip().lower()
 
-        summary_badge = ""
-        if doc.get("summary_ready"):
-            summary_badge = "  📝"
-        elif doc.get("summary_status") == "in_progress":
-            summary_badge = "  ⏳"
-        elif doc.get("summary_status") == "error":
-            summary_badge = "  ❌"
+        filtered = (
+            [d for d in documents if search in d["folder_name"].lower()]
+            if search else documents
+        )
 
-        ready_badge = "🟢" if doc["ready_to_chat"] else "🔴"
-        label = f"{ready_badge} {doc['folder_name']}{summary_badge}"
+        for doc in filtered:
+            key = f"doc_chk_{doc['folder_name']}"
+            st.session_state.setdefault(key, False)
+            is_selected = st.session_state.get(key, False)
+            is_ready    = doc["ready_to_chat"]
 
-        st.checkbox(label, key=key, disabled=not doc["ready_to_chat"])
+            summary_badge = ""
+            if doc.get("summary_ready"):
+                summary_badge = " 📝"
+            elif doc.get("summary_status") == "in_progress":
+                summary_badge = " ⏳"
+            elif doc.get("summary_status") == "error":
+                summary_badge = " ❌"
 
-    # Derive selected list from checkbox states
+            # Colored square file icon
+            icon_color = "#22C55E" if is_ready else "#EF4444"
+            icon_bg    = "rgba(34,197,94,0.12)" if is_ready else "rgba(239,68,68,0.12)"
+            icon_col, btn_col = st.columns([0.5, 10.5], gap="small")
+            with icon_col:
+                st.markdown(
+                    f'<div style="margin-top:9px;line-height:0;flex-shrink:0">'
+                    f'<svg width="14" height="18" viewBox="0 0 14 18" fill="none" xmlns="http://www.w3.org/2000/svg">'
+                    f'<path d="M0 0h9l5 5v13H0z" fill="{icon_color}"/>'
+                    f'<path d="M9 0l5 5H9z" fill="rgba(0,0,0,0.2)"/>'
+                    f'<line x1="2" y1="9" x2="12" y2="9" stroke="white" stroke-width="1.2" stroke-linecap="round"/>'
+                    f'<line x1="2" y1="12" x2="12" y2="12" stroke="white" stroke-width="1.2" stroke-linecap="round"/>'
+                    f'<line x1="2" y1="15" x2="8" y2="15" stroke="white" stroke-width="1.2" stroke-linecap="round"/>'
+                    f'</svg></div>',
+                    unsafe_allow_html=True,
+                )
+            with btn_col:
+                label = f"{doc['folder_name']}{summary_badge}"
+                btn_type = "primary" if is_selected else "secondary"
+                if is_ready:
+                    if st.button(label, key=f"doc_btn_{doc['folder_name']}",
+                                 use_container_width=True, type=btn_type):
+                        st.session_state[key] = not is_selected
+                        st.rerun()
+                else:
+                    st.button(label, key=f"doc_btn_{doc['folder_name']}",
+                              use_container_width=True, disabled=True)
+
+    # Derive selected from ALL documents (not just filtered view)
     selected = [
         doc["document_folder"]
         for doc in documents
@@ -356,11 +404,26 @@ def render_upload_panel() -> None:
         user_choice = "reuse"
 
     if st.button("Process uploaded PDF", use_container_width=True):
-        st.session_state["pending_pdf_name"] = uploaded_file.name
-        st.session_state["pending_pdf_bytes"] = uploaded_file.getvalue()
-        st.session_state["pending_pdf_choice"] = user_choice
-        st.session_state["pdf_processing"] = True
-        st.rerun()
+        if user_choice == "reuse":
+            # Nothing to rebuild — load existing metadata and return to main page
+            with st.spinner("Loading existing document..."):
+                metadata = pipeline.prepare_document(
+                    config_path=CONFIG_PATH,
+                    file_name=uploaded_file.name,
+                    file_bytes=uploaded_file.getvalue(),
+                    user_choice="reuse",
+                )
+            reset_chat()
+            if metadata.get("ready_to_chat"):
+                st.toast(f"`{metadata['document_name']}` is ready!")
+            st.rerun()  # closes dialog, no pdf_processing flag set
+        else:
+            # Full pipeline needed — hand off to the processing state machine
+            st.session_state["pending_pdf_name"] = uploaded_file.name
+            st.session_state["pending_pdf_bytes"] = uploaded_file.getvalue()
+            st.session_state["pending_pdf_choice"] = user_choice
+            st.session_state["pdf_processing"] = True
+            st.rerun()
 
 
 def render_url_panel() -> None:
@@ -395,6 +458,7 @@ def render_url_panel() -> None:
                 st.session_state["pending_url"] = ""
                 st.session_state["pending_user_choice"] = "new_version"
         st.rerun()
+        return
 
     if st.session_state["url_error"]:
         st.error(st.session_state["url_error"])
@@ -405,8 +469,6 @@ def render_url_panel() -> None:
         placeholder="https://example.com/report.pdf  or  https://example.com/article",
         key=f"url_input_{st.session_state['url_input_key']}",
     ).strip()
-    if not url:
-        return
 
     user_choice = "new_version"
     if url.startswith(("http://", "https://")) and "." in url[8:]:
@@ -423,10 +485,11 @@ def render_url_panel() -> None:
             st.info("Existing document not fully processed — will resume from last step.")
             user_choice = "reuse"
 
-    if st.button("Process URL", use_container_width=True, key="url_submit"):
+    if st.button("Process URL", disabled=not bool(url), use_container_width=True, key="url_submit"):
         st.session_state["pending_url"] = url
         st.session_state["pending_user_choice"] = user_choice
         st.session_state["url_processing"] = True
+        st.session_state["show_url_panel"] = False
         st.rerun()
 
 
@@ -511,27 +574,51 @@ def _render_routing_candidates() -> None:
 
 # ── Main chat area ───────────────────────────────────────────────────────────
 
-def render_chat() -> None:
+def _scroll_chat_to_bottom() -> None:
+    import streamlit.components.v1 as components
+    components.html("""
+    <script>
+    (function() {
+        function scroll() {
+            try {
+                var d = window.parent.document;
+                var marker = d.getElementById('chat-col-marker');
+                if (!marker) return;
+                var col = marker;
+                while (col && !(col.getAttribute && col.getAttribute('data-testid') === 'stColumn')) {
+                    col = col.parentElement;
+                }
+                if (col) col.scrollTop = col.scrollHeight;
+            } catch(e) {}
+        }
+        scroll();
+        setTimeout(scroll, 200);
+        setTimeout(scroll, 700);
+    })();
+    </script>
+    """, height=0)
+
+
+def render_chat(question: str | None = None) -> None:
     selected_folders = st.session_state.get("selected_document_folders", [])
     chat_mode = st.session_state.get("chat_mode", "routing")
     active_folders = st.session_state.get("active_deep_search_folders", [])
 
     if len(selected_folders) == 1:
-        _render_single_doc_chat(selected_folders[0])
-        return
-
-    if len(selected_folders) > 1:
-        _render_direct_multi_doc_chat(selected_folders)
-        return
-
-    # ── No docs selected: routing mode or deep search (post-routing) ─────────
-    if chat_mode == "deep_search" and active_folders:
-        _render_deep_search_chat(active_folders)
+        _render_single_doc_chat(selected_folders[0], question)
+        _scroll_chat_to_bottom()
+    elif len(selected_folders) > 1:
+        _render_direct_multi_doc_chat(selected_folders, question)
+        _scroll_chat_to_bottom()
+    elif chat_mode == "deep_search" and active_folders:
+        _render_deep_search_chat(active_folders, question)
+        _scroll_chat_to_bottom()
     else:
-        _render_routing_chat()
+        _render_routing_chat(question)
+        _scroll_chat_to_bottom()
 
 
-def _render_single_doc_chat(document_folder: str) -> None:
+def _render_single_doc_chat(document_folder: str, question: str | None = None) -> None:
     metadata = pipeline.load_document(document_folder)
     st.subheader(f"Chatting with `{metadata['document_name']}`")
     st.caption(
@@ -545,7 +632,6 @@ def _render_single_doc_chat(document_folder: str) -> None:
 
     _render_message_history()
 
-    question = st.chat_input("Ask a question about this document")
     if not question:
         return
 
@@ -592,21 +678,20 @@ def _render_single_doc_chat(document_folder: str) -> None:
     })
 
 
-def _render_direct_multi_doc_chat(document_folders: list[str]) -> None:
+def _render_direct_multi_doc_chat(document_folders: list[str], question: str | None = None) -> None:
     doc_names = [pipeline.load_document(f).get("document_name", Path(f).name) for f in document_folders]
     st.subheader(f"Multi-doc mode — {len(document_folders)} documents")
     st.caption(", ".join(doc_names))
 
     _render_message_history()
 
-    question = st.chat_input("Ask a question across selected documents")
     if not question:
         return
 
     _process_multi_doc_question(question, document_folders)
 
 
-def _render_routing_chat() -> None:
+def _render_routing_chat(question: str | None = None) -> None:
     st.subheader("Find relevant documents")
     st.caption(
         "Ask a question and the system will search across all document summaries "
@@ -616,7 +701,6 @@ def _render_routing_chat() -> None:
     _render_message_history()
     _render_routing_candidates()
 
-    question = st.chat_input("Ask a question to find relevant documents...")
     if not question:
         return
 
@@ -643,7 +727,7 @@ def _render_routing_chat() -> None:
     st.rerun()  # raises RerunException — stops execution here
 
 
-def _render_deep_search_chat(active_folders: list[str]) -> None:
+def _render_deep_search_chat(active_folders: list[str], question: str | None = None) -> None:
     doc_names = [pipeline.load_document(f).get("document_name", Path(f).name) for f in active_folders]
 
     # Banner
@@ -667,7 +751,6 @@ def _render_deep_search_chat(active_folders: list[str]) -> None:
 
     _render_message_history()
 
-    question = st.chat_input("Ask a question about these documents... (type /back to change documents)")
     if not question:
         return
 
@@ -723,132 +806,425 @@ def _process_multi_doc_question(question: str, document_folders: list[str]) -> N
 
 _NAVBAR_HTML = (
     '<div class="profrag-navbar">'
-    '<span class="profrag-navbar-title">📄 ProfRAG</span>'
+    '<span class="profrag-navbar-title">ProfRAG</span>'
     "</div>"
 )
 
 _APP_CSS = """
 <style>
-/* ── Navbar ──────────────────────────────────────────────────────────────── */
+/* Design tokens */
+:root {
+    --c-accent:    #4F6EF7;
+    --c-success:   #22C55E;
+    --c-error:     #EF4444;
+    --c-warning:   #F59E0B;
+    --c-text1:     #111827;
+    --c-text2:     #6B7280;
+    --c-border:    #E5E7EB;
+    --c-bg-page:   #F3F4F6;
+    --c-pane-doc:  #FFFFFF;
+    --c-pane-sum:  #FFFFFF;
+    --c-pane-chat: #F7F8FA;
+    --bar-h:       68px;
+}
+
+/* Navbar */
 .profrag-navbar {
-    position: fixed;
-    top: 0; left: 0; right: 0;
-    height: 52px;
-    z-index: 999999;
-    background: linear-gradient(90deg, #1a3558 0%, #2563a8 100%);
-    display: flex;
-    align-items: center;
+    position: fixed; top: 0; left: 0; right: 0;
+    height: 52px; z-index: 999999;
+    background: #ffffff;
+    border-bottom: 1px solid var(--c-border);
+    display: flex; align-items: center;
     padding: 0 1.5rem;
-    box-shadow: 0 2px 10px rgba(0,0,0,0.25);
 }
 .profrag-navbar-title {
-    color: #ffffff;
-    font-size: 1.45rem;
-    font-weight: 800;
-    letter-spacing: 0.12em;
-    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-    text-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    color: var(--c-text1);
+    font-size: 1.1rem; font-weight: 700; letter-spacing: 0.01em;
+    font-family: 'Inter','Segoe UI',system-ui,sans-serif;
 }
 
-/* ── Main layout ─────────────────────────────────────────────────────────── */
-[data-testid="stMainBlockContainer"],
-.block-container {
-    padding-left:  0 !important;
-    padding-right: 0 !important;
-    padding-top:   52px !important;
-    max-width:     100% !important;
+/* Page lock */
+html, body, .stApp { overflow: hidden !important; height: 100% !important; }
+section[data-testid="stMain"] { background: var(--c-bg-page) !important; overflow: hidden !important; }
+
+/* Main layout */
+[data-testid="stMainBlockContainer"], .block-container {
+    padding: 60px 8px 0 8px !important; max-width: 100% !important;
 }
-section[data-testid="stMain"] {
-    background-color: #edf4fc !important;
+[data-testid="stMainBlockContainer"] > div:first-child { margin-top: 0 !important; padding-top: 0 !important; }
+/* #chat-col-marker is always present — reliably targets the main 3-column block */
+[data-testid="stHorizontalBlock"]:has(#chat-col-marker),
+[data-testid="stHorizontalBlock"]:has(#doc-col-marker),
+[data-testid="stHorizontalBlock"]:has(#doc-tab-marker) {
+    margin-top: 0 !important; padding-top: 0 !important;
+    gap: 0 !important; column-gap: 0 !important; align-items: stretch !important;
+}
+/* Zero padding/margin on each column flex item */
+[data-testid="stHorizontalBlock"]:has(#chat-col-marker) > [data-testid="stColumn"],
+[data-testid="stHorizontalBlock"]:has(#doc-col-marker) > [data-testid="stColumn"],
+[data-testid="stHorizontalBlock"]:has(#doc-tab-marker) > [data-testid="stColumn"] {
+    padding: 0 !important; margin: 0 !important;
 }
 
-/* ── Open pane columns — independently scrollable ────────────────────────── */
-[data-testid="stColumn"]:has(#doc-col-marker) {
-    background-color: #b8d0eb !important;
-    border-right:     2px solid #6fa3d8 !important;
-    height:           calc(100vh - 52px);
-    overflow-y:       auto;
-    overflow-x:       hidden;
-}
-[data-testid="stColumn"]:has(#summary-pane-marker) {
-    background-color: #d4e8f8 !important;
-    border-right:     2px solid #6fa3d8 !important;
-    height:           calc(100vh - 52px);
-    overflow-y:       auto;
-    overflow-x:       hidden;
-}
-[data-testid="stColumn"]:has(#chat-col-marker) {
-    height:           calc(100vh - 52px);
-    overflow-y:       auto;
-    overflow-x:       hidden;
-}
-
-/* ── Collapsed pane tabs (narrow expand strips) ──────────────────────────── */
+/* Pane heights */
+[data-testid="stColumn"]:has(#doc-col-marker),
+[data-testid="stColumn"]:has(#summary-pane-marker),
+[data-testid="stColumn"]:has(#chat-col-marker),
 [data-testid="stColumn"]:has(#doc-tab-marker),
 [data-testid="stColumn"]:has(#sum-tab-marker) {
-    height:   calc(100vh - 52px);
-    overflow: hidden;
-    cursor:   pointer;
+    height: calc(100vh - 60px) !important; overflow: hidden;
 }
+[data-testid="stColumn"]:has(#doc-col-marker),
+[data-testid="stColumn"]:has(#summary-pane-marker) {
+    overflow-y: auto !important; overflow-x: hidden !important;
+}
+
+/* Doc pane: white */
+[data-testid="stColumn"]:has(#doc-col-marker) {
+    background: var(--c-pane-doc) !important;
+    border-radius: 0 !important;
+    border-right: 1px solid #000 !important;
+}
+[data-testid="stColumn"]:has(#doc-col-marker) > div { padding-left: 0.875rem !important; padding-right: 0.875rem !important; }
+[data-testid="stColumn"]:has(#doc-col-marker) p,
+[data-testid="stColumn"]:has(#doc-col-marker) span,
+[data-testid="stColumn"]:has(#doc-col-marker) h1,
+[data-testid="stColumn"]:has(#doc-col-marker) h2,
+[data-testid="stColumn"]:has(#doc-col-marker) h3,
+[data-testid="stColumn"]:has(#doc-col-marker) h4,
+[data-testid="stColumn"]:has(#doc-col-marker) label,
+[data-testid="stColumn"]:has(#doc-col-marker) small,
+[data-testid="stColumn"]:has(#doc-col-marker) li,
+[data-testid="stColumn"]:has(#doc-col-marker) strong,
+[data-testid="stColumn"]:has(#doc-col-marker) a { color: var(--c-text1) !important; }
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stCaptionContainer"] p,
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stCaptionContainer"] span { color: var(--c-text2) !important; }
+[data-testid="stColumn"]:has(#doc-col-marker) hr { border-color: var(--c-border) !important; }
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stVerticalBlockBorderWrapper"] {
+    background: transparent !important; border: none !important; box-shadow: none !important;
+}
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stTextInputRootElement"] input {
+    background: #F9FAFB !important; border: 1px solid var(--c-border) !important;
+    border-radius: 8px !important; color: var(--c-text1) !important;
+}
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stTextInputRootElement"] input::placeholder { color: var(--c-text2) !important; }
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stBaseButton-secondary"] {
+    background: transparent !important; border: none !important; box-shadow: none !important;
+    border-radius: 8px !important; color: var(--c-text1) !important;
+    text-align: left !important; font-size: 0.85rem !important; transition: background 0.12s !important;
+}
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stBaseButton-secondary"]:hover { background: #F3F4F6 !important; }
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stBaseButton-primary"] {
+    background: rgba(79,110,247,0.10) !important; color: var(--c-accent) !important;
+    border: none !important; border-radius: 8px !important; font-size: 0.85rem !important;
+    text-align: left !important; box-shadow: none !important;
+}
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stBaseButton-secondary"] p,
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stBaseButton-primary"] p {
+    overflow: hidden !important; text-overflow: ellipsis !important;
+    white-space: nowrap !important; max-width: 100% !important; margin: 0 !important;
+}
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stAlert"],
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stAlert"] p { color: var(--c-text1) !important; }
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stExpander"] summary,
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stExpander"] summary p { color: var(--c-text1) !important; }
+
+/* Sticky doc header */
+[data-testid="stHorizontalBlock"]:has(#doc-collapse-sticky-marker) {
+    position: sticky !important; top: 0 !important; z-index: 10 !important;
+    background: var(--c-pane-doc) !important; padding-bottom: 2px !important;
+    align-items: center !important;
+}
+/* Collapse/expand buttons — borderless, icon-only */
+[data-testid="stHorizontalBlock"]:has(#doc-collapse-sticky-marker) [data-testid="stBaseButton-secondary"],
+[data-testid="stHorizontalBlock"]:has(#sum-close-sticky-marker) [data-testid="stBaseButton-secondary"],
+[data-testid="stHorizontalBlock"]:has(#doc-collapse-sticky-marker) button,
+[data-testid="stHorizontalBlock"]:has(#sum-close-sticky-marker) button {
+    background: transparent !important; border: none !important; box-shadow: none !important;
+    outline: none !important; color: var(--c-text2) !important;
+    font-size: 1rem !important; padding: 4px 8px !important;
+}
+[data-testid="stHorizontalBlock"]:has(#doc-collapse-sticky-marker) [data-testid="stBaseButton-secondary"]:hover,
+[data-testid="stHorizontalBlock"]:has(#sum-close-sticky-marker) [data-testid="stBaseButton-secondary"]:hover,
+[data-testid="stHorizontalBlock"]:has(#doc-collapse-sticky-marker) button:hover,
+[data-testid="stHorizontalBlock"]:has(#sum-close-sticky-marker) button:hover {
+    background: rgba(0,0,0,0.05) !important; border: none !important;
+}
+/* Zero out h3 margin so title and button are the same height in the flex row */
+[data-testid="stHorizontalBlock"]:has(#doc-collapse-sticky-marker) h3,
+[data-testid="stHorizontalBlock"]:has(#sum-close-sticky-marker) h3 {
+    margin-top: 0 !important; margin-bottom: 0 !important; line-height: 1.2 !important;
+}
+
+/* Summary pane */
+[data-testid="stColumn"]:has(#summary-pane-marker) {
+    background: var(--c-pane-sum) !important;
+    border-radius: 0 !important;
+    border-left: 1px solid #000 !important;
+    border-right: 1px solid #000 !important;
+}
+[data-testid="stColumn"]:has(#summary-pane-marker) > div { padding-left: 0.875rem !important; padding-right: 0.875rem !important; }
+[data-testid="stColumn"]:has(#summary-pane-marker) p,
+[data-testid="stColumn"]:has(#summary-pane-marker) span,
+[data-testid="stColumn"]:has(#summary-pane-marker) label,
+[data-testid="stColumn"]:has(#summary-pane-marker) strong,
+[data-testid="stColumn"]:has(#summary-pane-marker) li { color: var(--c-text1) !important; }
+[data-testid="stColumn"]:has(#summary-pane-marker) h1,
+[data-testid="stColumn"]:has(#summary-pane-marker) h2,
+[data-testid="stColumn"]:has(#summary-pane-marker) h3,
+[data-testid="stColumn"]:has(#summary-pane-marker) h4 { color: var(--c-text1) !important; }
+[data-testid="stColumn"]:has(#summary-pane-marker) [data-testid="stCaptionContainer"] p,
+[data-testid="stColumn"]:has(#summary-pane-marker) [data-testid="stCaptionContainer"] span { color: var(--c-text2) !important; }
+[data-testid="stHorizontalBlock"]:has(#sum-close-sticky-marker) {
+    position: sticky !important; top: 0 !important; z-index: 10 !important;
+    background: var(--c-pane-sum) !important; padding-bottom: 2px !important;
+    align-items: center !important;
+}
+
+/* Chat pane */
+[data-testid="stColumn"]:has(#chat-col-marker) {
+    background: var(--c-pane-chat) !important;
+    border-radius: 0 !important;
+    border-left: 1px solid #000 !important;
+}
+[data-testid="stColumn"]:has(#chat-col-marker) > div {
+    padding-left: 1rem !important; padding-right: 1rem !important;
+    padding-bottom: calc(var(--bar-h) + 16px) !important;
+}
+[data-testid="stColumn"]:has(#chat-col-marker) p,
+[data-testid="stColumn"]:has(#chat-col-marker) span,
+[data-testid="stColumn"]:has(#chat-col-marker) label,
+[data-testid="stColumn"]:has(#chat-col-marker) strong,
+[data-testid="stColumn"]:has(#chat-col-marker) li { color: var(--c-text1) !important; }
+[data-testid="stColumn"]:has(#chat-col-marker) h1,
+[data-testid="stColumn"]:has(#chat-col-marker) h2,
+[data-testid="stColumn"]:has(#chat-col-marker) h3,
+[data-testid="stColumn"]:has(#chat-col-marker) h4 { color: var(--c-text1) !important; }
+[data-testid="stColumn"]:has(#chat-col-marker) [data-testid="stCaptionContainer"] p,
+[data-testid="stColumn"]:has(#chat-col-marker) [data-testid="stCaptionContainer"] span {
+    color: var(--c-text2) !important; font-size: 0.88rem !important;
+}
+
+/* Collapsed tab strips */
 [data-testid="stColumn"]:has(#doc-tab-marker) {
-    background-color: #b8d0eb !important;
-    border-right:     2px solid #6fa3d8 !important;
+    background: var(--c-pane-doc) !important; border-radius: 0 !important;
+    border-right: 1px solid #000 !important;
+    position: relative !important;
 }
 [data-testid="stColumn"]:has(#sum-tab-marker) {
-    background-color: #d4e8f8 !important;
-    border-right:     2px solid #6fa3d8 !important;
+    background: var(--c-pane-sum) !important; border-radius: 0 !important;
+    border-left: 1px solid #000 !important;
+    border-right: 1px solid #000 !important;
+    position: relative !important;
 }
-/* Strip default vertical-block padding so button fills the narrow column */
+[data-testid="stColumn"]:has(#doc-tab-marker)::before {
+    content: 'DOCUMENTS';
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%) rotate(-90deg);
+    color: #9CA3AF; font-size: 0.72rem; font-weight: 600;
+    letter-spacing: 0.06em; white-space: nowrap; pointer-events: none;
+}
+[data-testid="stColumn"]:has(#sum-tab-marker)::before {
+    content: 'SUMMARIES';
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%) rotate(-90deg);
+    color: #9CA3AF; font-size: 0.72rem; font-weight: 600;
+    letter-spacing: 0.06em; white-space: nowrap; pointer-events: none;
+}
 [data-testid="stColumn"]:has(#doc-tab-marker) [data-testid="stVerticalBlock"],
-[data-testid="stColumn"]:has(#sum-tab-marker) [data-testid="stVerticalBlock"] {
-    padding: 0 !important;
-    gap:     0 !important;
+[data-testid="stColumn"]:has(#sum-tab-marker) [data-testid="stVerticalBlock"] { padding: 0 !important; gap: 0 !important; }
+[data-testid="stColumn"]:has(#doc-tab-marker) [data-testid="stMarkdownContainer"],
+[data-testid="stColumn"]:has(#sum-tab-marker) [data-testid="stMarkdownContainer"] {
+    flex: 0 0 auto !important; height: auto !important;
 }
-/* Expand-arrow button style */
 [data-testid="stColumn"]:has(#doc-tab-marker) button,
 [data-testid="stColumn"]:has(#sum-tab-marker) button {
-    background:  transparent !important;
-    border:      none !important;
-    box-shadow:  none !important;
-    color:       #1a3558 !important;
-    font-size:   1.2rem !important;
-    font-weight: 900 !important;
-    min-height:  64px !important;
-    width:       100% !important;
-    padding:     10px 0 !important;
+    background: transparent !important; border: none !important; box-shadow: none !important;
+    color: var(--c-text2) !important; font-size: 1.1rem !important; font-weight: 600 !important;
+    min-height: 44px !important; width: 100% !important; padding: 6px 0 !important;
 }
 [data-testid="stColumn"]:has(#doc-tab-marker) button:hover,
 [data-testid="stColumn"]:has(#sum-tab-marker) button:hover {
-    background: rgba(26, 53, 88, 0.14) !important;
-    color:      #2563a8 !important;
+    background: rgba(0,0,0,0.04) !important; color: var(--c-text1) !important;
 }
 
-/* ── Responsive — tablet (≤ 1024px) ─────────────────────────────────────── */
-@media (max-width: 1024px) {
-    .profrag-navbar-title { font-size: 1.25rem; }
+/* Summary progress pulse */
+@keyframes pulse-opacity { 0%,100%{opacity:1} 50%{opacity:0.35} }
+.summary-progress-badge {
+    display: inline-block; padding: 3px 12px; border-radius: 20px;
+    font-size: 0.78rem; font-weight: 600;
+    background: rgba(245,158,11,0.12); color: #B45309;
+    animation: pulse-opacity 2s ease-in-out infinite;
 }
 
-/* ── Responsive — mobile (≤ 768px) ──────────────────────────────────────── */
+/* Chat column — two-section layout: messages area + fixed bar below */
+[data-testid="stColumn"]:has(#chat-col-marker) {
+    position: relative !important;
+    overflow: hidden !important;
+}
+/* Suppress Streamlit-generated scrollbars on chat column wrappers — only messages area scrolls */
+[data-testid="stColumn"]:has(#chat-col-marker) > div,
+[data-testid="stColumn"]:has(#chat-col-marker) > [data-testid="stVerticalBlockBorderWrapper"],
+[data-testid="stColumn"]:has(#chat-col-marker) > div > [data-testid="stVerticalBlock"],
+[data-testid="stColumn"]:has(#chat-col-marker) > [data-testid="stVerticalBlockBorderWrapper"] > [data-testid="stVerticalBlock"] {
+    overflow: hidden !important;
+}
+/* Messages area: absolute, fills the column above the bar (70px for bar + border) */
+[data-testid="stVerticalBlockBorderWrapper"]:has(#chat-messages-area) {
+    position: absolute !important;
+    top: 0 !important; left: 0 !important; right: 0 !important; bottom: 70px !important;
+    overflow: hidden !important;
+    background: transparent !important; border: none !important;
+    padding: 0 !important; margin: 0 !important;
+}
+[data-testid="stVerticalBlock"]:has(#chat-messages-area) {
+    height: 100% !important;
+    overflow-y: auto !important; overflow-x: hidden !important;
+    padding-bottom: 12px !important;
+}
+
+/* Action bar — anchored to the bottom of the fixed-height chat column */
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) {
+    position: absolute !important;
+    bottom: 0 !important; left: 0 !important; right: 0 !important;
+    background: #ffffff !important;
+    border: none !important; border-top: 1px solid #000 !important; border-radius: 0 !important;
+    padding: 12px 16px !important; gap: 12px !important;
+    align-items: center !important; min-height: 68px !important;
+    box-shadow: none !important; margin: 0 !important; z-index: 100 !important;
+}
+/* Columns inside the bar — prevent Streamlit's default column gap override */
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) > [data-testid="stColumn"] {
+    flex-shrink: 0 !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stBaseButton-secondary"] {
+    background: #F3F4F6 !important; border: 1px solid var(--c-border) !important;
+    border-radius: 10px !important;
+    min-height: 38px !important; max-height: 38px !important; min-width: 38px !important;
+    color: var(--c-text2) !important; font-size: 1.2rem !important;
+    box-shadow: none !important; padding: 0 !important; transition: background 0.12s !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stBaseButton-secondary"]:hover { background: #E5E7EB !important; }
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stForm"] {
+    background: transparent !important; border: none !important; padding: 0 !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stTextInputRootElement"],
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stTextInputRootElement"] > div {
+    background: transparent !important; border: none !important; box-shadow: none !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stTextInputRootElement"] input {
+    border: none !important; background: transparent !important; box-shadow: none !important;
+    font-size: 0.95rem !important; color: var(--c-text1) !important; padding: 6px 10px !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stTextInputRootElement"] input:focus {
+    outline: none !important; box-shadow: none !important; border: none !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stTextInputRootElement"] label { display: none !important; }
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stFormSubmitButton"] button {
+    background: var(--c-accent) !important; color: #fff !important;
+    border-radius: 10px !important; min-height: 38px !important; max-height: 38px !important;
+    padding: 0 20px !important; border: none !important;
+    font-size: 0.9rem !important; font-weight: 600 !important;
+    box-shadow: none !important; transition: background 0.12s !important; white-space: nowrap !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stFormSubmitButton"] button:hover { background: #3B55D4 !important; }
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stForm"] [data-testid="stVerticalBlock"] {
+    display: flex !important; flex-direction: row !important;
+    align-items: center !important; gap: 6px !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stTextInputRootElement"] {
+    flex: 1 1 auto !important; min-width: 0 !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stFormSubmitButton"] {
+    flex: 0 0 auto !important; width: auto !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stFormSubmitButton"] button {
+    width: auto !important;
+}
+
+
+/* Responsive */
 @media (max-width: 768px) {
-    .profrag-navbar-title { font-size: 1rem; letter-spacing: 0.05em; }
-    [data-testid="stHorizontalBlock"]:has(#chat-col-marker) {
-        flex-wrap: wrap !important;
-    }
+    [data-testid="stHorizontalBlock"]:has(#doc-col-marker),
+    [data-testid="stHorizontalBlock"]:has(#chat-col-marker) { flex-wrap: wrap !important; }
     [data-testid="stColumn"]:has(#doc-col-marker),
     [data-testid="stColumn"]:has(#doc-tab-marker),
     [data-testid="stColumn"]:has(#summary-pane-marker),
     [data-testid="stColumn"]:has(#sum-tab-marker),
     [data-testid="stColumn"]:has(#chat-col-marker) {
-        min-width:    100% !important;
-        width:        100% !important;
-        height:       auto !important;
-        max-height:   55vh;
-        border-right: none !important;
-        border-bottom: 2px solid #6fa3d8;
+        min-width: 100% !important; width: 100% !important;
+        height: auto !important; max-height: 50vh; border-radius: 12px !important;
     }
 }
 </style>
+
 """
+
+
+
+@st.dialog("Add Document", width="large")
+def show_add_document_dialog() -> None:
+    """Modal overlay with Upload PDF / From URL tabs."""
+    tab_pdf, tab_url = st.tabs(["📎 Upload PDF", "🔗 From URL"])
+    with tab_pdf:
+        render_upload_panel()
+    with tab_url:
+        render_url_panel()
+
+
+def render_action_bar() -> str | None:
+    """Floating bar inside chat column: + button opens modal | chat input | send."""
+    selected  = st.session_state.get("selected_document_folders", [])
+    chat_mode = st.session_state.get("chat_mode", "routing")
+    active_ds = st.session_state.get("active_deep_search_folders", [])
+
+    if len(selected) == 1:
+        placeholder = "Ask a question about this document..."
+    elif len(selected) > 1:
+        placeholder = "Ask a question across selected documents..."
+    elif chat_mode == "deep_search" and active_ds:
+        placeholder = "Ask a follow-up...  (/back to change documents)"
+    else:
+        placeholder = "Ask anything..."
+
+    c_plus, c_form = st.columns([1, 22])
+
+    with c_plus:
+        st.markdown('<span id="action-bar-marker"></span>', unsafe_allow_html=True)
+        if st.button("+", key="bar_plus_btn", use_container_width=True,
+                     type="secondary"):
+            show_add_document_dialog()
+
+    with c_form:
+        with st.form("chat_bar_form", clear_on_submit=True, border=False):
+            question = st.text_input(
+                "Ask",
+                placeholder=placeholder,
+                label_visibility="collapsed",
+                key="bar_chat_field",
+            )
+            submitted = st.form_submit_button("↗ Send")
+
+        if submitted and question:
+            return question.strip()
+
+    return None
+
+
+def _maybe_auto_refresh() -> None:
+    """Poll summarization daemons and rerun every 3 s while any are active."""
+    import time
+    active = st.session_state.get("active_summarization_folders", set())
+    if not active:
+        return
+    still_running = {
+        f for f in active
+        if pipeline.load_document(f).get("summary_status") == "in_progress"
+    }
+    st.session_state["active_summarization_folders"] = still_running
+    if still_running:
+        time.sleep(3)
+        st.rerun()
 
 
 def main() -> None:
@@ -856,6 +1232,13 @@ def main() -> None:
     st.markdown(_APP_CSS, unsafe_allow_html=True)
     st.markdown(_NAVBAR_HTML, unsafe_allow_html=True)
     initialize_state()
+
+    pending_q = st.session_state.pop("_bar_question", None) or None
+
+    # Re-open the upload dialog if processing is still active (st.rerun() inside a
+    # @st.dialog closes it, so we call it again here to keep the spinner visible).
+    if st.session_state.get("pdf_processing") or st.session_state.get("url_processing"):
+        show_add_document_dialog()
 
     show_doc = st.session_state.get("show_doc_pane", True)
     show_sum = st.session_state.get("show_summary_pane", True)
@@ -887,17 +1270,16 @@ def main() -> None:
     if doc_col is not None:
         with doc_col:
             st.markdown('<span id="doc-col-marker"></span>', unsafe_allow_html=True)
-            _, coll_col = st.columns([6, 1])
+            coll_space, coll_col = st.columns([6, 1])
+            with coll_space:
+                st.markdown('<span id="doc-collapse-sticky-marker"></span>', unsafe_allow_html=True)
+                st.subheader("Documents")
             with coll_col:
                 if st.button("◀", key="doc_collapse", use_container_width=True,
                              help="Collapse Documents"):
                     st.session_state["show_doc_pane"] = False
                     st.rerun()
-            st.subheader("Documents")
             render_existing_documents()
-            st.divider()
-            st.subheader("Add Document")
-            render_ingest_panel()
 
     # Read selection AFTER render_existing_documents() has updated session state
     # so the summary pane and chat see the current checkbox values, not last frame's.
@@ -920,8 +1302,16 @@ def main() -> None:
     # ── Chat column (always visible) ─────────────────────────────────────────
     with chat_col:
         st.markdown('<span id="chat-col-marker"></span>', unsafe_allow_html=True)
-        st.caption("Select documents from the left panel or ask a question to find relevant documents automatically.")
-        render_chat()
+        with st.container():
+            st.markdown('<span id="chat-messages-area"></span>', unsafe_allow_html=True)
+            render_chat(question=pending_q)
+
+        question = render_action_bar()
+        if question:
+            st.session_state["_bar_question"] = question
+            st.rerun()
+
+    _maybe_auto_refresh()
 
 
 if __name__ == "__main__":
