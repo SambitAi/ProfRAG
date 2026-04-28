@@ -126,7 +126,7 @@ def render_summary_pane(selected_folders: list[str]) -> None:
     # this specific stColumn without touching inner button-row columns.
     st.markdown('<span id="summary-pane-marker"></span>', unsafe_allow_html=True)
 
-    col_title, col_close = st.columns([4, 1])
+    col_title, col_close = st.columns([4, 1], vertical_alignment="center")
     with col_title:
         st.markdown('<span id="sum-close-sticky-marker"></span>', unsafe_allow_html=True)
         st.subheader("Summaries")
@@ -142,8 +142,6 @@ def render_summary_pane(selected_folders: list[str]) -> None:
         st.session_state["_sum_pane_active_doc"]   = ""
         st.session_state["_sum_pane_active_level"] = ""
         active_doc = active_level = ""
-
-    st.divider()
 
     if not selected_folders:
         st.caption("Select documents from the left panel to view their summaries here.")
@@ -582,13 +580,13 @@ def _scroll_chat_to_bottom() -> None:
         function scroll() {
             try {
                 var d = window.parent.document;
-                var marker = d.getElementById('chat-col-marker');
+                var marker = d.getElementById('chat-messages-area');
                 if (!marker) return;
-                var col = marker;
-                while (col && !(col.getAttribute && col.getAttribute('data-testid') === 'stColumn')) {
-                    col = col.parentElement;
+                var el = marker;
+                while (el && !(el.getAttribute && el.getAttribute('data-testid') === 'stVerticalBlock')) {
+                    el = el.parentElement;
                 }
-                if (col) col.scrollTop = col.scrollHeight;
+                if (el) el.scrollTop = el.scrollHeight;
             } catch(e) {}
         }
         scroll();
@@ -825,6 +823,7 @@ _APP_CSS = """
     --c-pane-doc:  #FFFFFF;
     --c-pane-sum:  #FFFFFF;
     --c-pane-chat: #F7F8FA;
+    --navbar-h:    52px;
     --bar-h:       68px;
 }
 
@@ -833,7 +832,7 @@ _APP_CSS = """
     position: fixed; top: 0; left: 0; right: 0;
     height: 52px; z-index: 999999;
     background: #ffffff;
-    border-bottom: 1px solid var(--c-border);
+    border-bottom: 2px solid #000;
     display: flex; align-items: center;
     padding: 0 1.5rem;
 }
@@ -845,11 +844,12 @@ _APP_CSS = """
 
 /* Page lock */
 html, body, .stApp { overflow: hidden !important; height: 100% !important; }
-section[data-testid="stMain"] { background: var(--c-bg-page) !important; overflow: hidden !important; }
+section[data-testid="stMain"] { background: var(--c-bg-page) !important; overflow: hidden !important; padding-bottom: 0 !important; margin-bottom: 0 !important; }
+section[data-testid="stMain"] > div { padding-bottom: 0 !important; margin-bottom: 0 !important; }
 
 /* Main layout */
 [data-testid="stMainBlockContainer"], .block-container {
-    padding: 60px 8px 0 8px !important; max-width: 100% !important;
+    padding: var(--navbar-h) 0 0 0 !important; max-width: 100% !important;
 }
 [data-testid="stMainBlockContainer"] > div:first-child { margin-top: 0 !important; padding-top: 0 !important; }
 /* #chat-col-marker is always present — reliably targets the main 3-column block */
@@ -857,13 +857,14 @@ section[data-testid="stMain"] { background: var(--c-bg-page) !important; overflo
 [data-testid="stHorizontalBlock"]:has(#doc-col-marker),
 [data-testid="stHorizontalBlock"]:has(#doc-tab-marker) {
     margin-top: 0 !important; padding-top: 0 !important;
+    margin-bottom: 0 !important; padding-bottom: 0 !important;
     gap: 0 !important; column-gap: 0 !important; align-items: stretch !important;
 }
-/* Zero padding/margin on each column flex item */
+/* Zero only horizontal padding on column flex items — don't touch vertical/margin */
 [data-testid="stHorizontalBlock"]:has(#chat-col-marker) > [data-testid="stColumn"],
 [data-testid="stHorizontalBlock"]:has(#doc-col-marker) > [data-testid="stColumn"],
 [data-testid="stHorizontalBlock"]:has(#doc-tab-marker) > [data-testid="stColumn"] {
-    padding: 0 !important; margin: 0 !important;
+    padding-left: 0 !important; padding-right: 0 !important;
 }
 
 /* Pane heights */
@@ -872,7 +873,7 @@ section[data-testid="stMain"] { background: var(--c-bg-page) !important; overflo
 [data-testid="stColumn"]:has(#chat-col-marker),
 [data-testid="stColumn"]:has(#doc-tab-marker),
 [data-testid="stColumn"]:has(#sum-tab-marker) {
-    height: calc(100vh - 60px) !important; overflow: hidden;
+    height: calc(100vh - var(--navbar-h)) !important; overflow: hidden;
 }
 [data-testid="stColumn"]:has(#doc-col-marker),
 [data-testid="stColumn"]:has(#summary-pane-marker) {
@@ -904,8 +905,8 @@ section[data-testid="stMain"] { background: var(--c-bg-page) !important; overflo
     background: transparent !important; border: none !important; box-shadow: none !important;
 }
 [data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stTextInputRootElement"] input {
-    background: #F9FAFB !important; border: 1px solid var(--c-border) !important;
-    border-radius: 8px !important; color: var(--c-text1) !important;
+    background: #F9FAFB !important; border: 1px solid #000 !important;
+    border-radius: 0 !important; color: var(--c-text1) !important;
 }
 [data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stTextInputRootElement"] input::placeholder { color: var(--c-text2) !important; }
 [data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stBaseButton-secondary"] {
@@ -983,13 +984,13 @@ section[data-testid="stMain"] { background: var(--c-bg-page) !important; overflo
 
 /* Chat pane */
 [data-testid="stColumn"]:has(#chat-col-marker) {
-    background: var(--c-pane-chat) !important;
+    background: #ffffff !important;
     border-radius: 0 !important;
     border-left: 1px solid #000 !important;
 }
 [data-testid="stColumn"]:has(#chat-col-marker) > div {
     padding-left: 1rem !important; padding-right: 1rem !important;
-    padding-bottom: calc(var(--bar-h) + 16px) !important;
+    padding-bottom: 0 !important;
 }
 [data-testid="stColumn"]:has(#chat-col-marker) p,
 [data-testid="stColumn"]:has(#chat-col-marker) span,
@@ -1010,12 +1011,16 @@ section[data-testid="stMain"] { background: var(--c-bg-page) !important; overflo
     background: var(--c-pane-doc) !important; border-radius: 0 !important;
     border-right: 1px solid #000 !important;
     position: relative !important;
+    display: flex !important; flex-direction: column !important;
+    align-items: center !important; justify-content: center !important;
 }
 [data-testid="stColumn"]:has(#sum-tab-marker) {
     background: var(--c-pane-sum) !important; border-radius: 0 !important;
     border-left: 1px solid #000 !important;
     border-right: 1px solid #000 !important;
     position: relative !important;
+    display: flex !important; flex-direction: column !important;
+    align-items: center !important; justify-content: center !important;
 }
 [data-testid="stColumn"]:has(#doc-tab-marker)::before {
     content: 'DOCUMENTS';
@@ -1031,8 +1036,21 @@ section[data-testid="stMain"] { background: var(--c-bg-page) !important; overflo
     color: #9CA3AF; font-size: 0.72rem; font-weight: 600;
     letter-spacing: 0.06em; white-space: nowrap; pointer-events: none;
 }
+[data-testid="stColumn"]:has(#doc-tab-marker) > div,
+[data-testid="stColumn"]:has(#sum-tab-marker) > div,
+[data-testid="stColumn"]:has(#doc-tab-marker) > div > [data-testid="stVerticalBlockBorderWrapper"],
+[data-testid="stColumn"]:has(#sum-tab-marker) > div > [data-testid="stVerticalBlockBorderWrapper"] {
+    display: flex !important; flex-direction: column !important;
+    align-items: center !important; justify-content: center !important;
+    flex: 1 1 auto !important; height: 100% !important;
+}
 [data-testid="stColumn"]:has(#doc-tab-marker) [data-testid="stVerticalBlock"],
-[data-testid="stColumn"]:has(#sum-tab-marker) [data-testid="stVerticalBlock"] { padding: 0 !important; gap: 0 !important; }
+[data-testid="stColumn"]:has(#sum-tab-marker) [data-testid="stVerticalBlock"] {
+    padding: 0 !important; gap: 0 !important;
+    display: flex !important; flex-direction: column !important;
+    align-items: center !important; justify-content: center !important;
+    height: 100% !important;
+}
 [data-testid="stColumn"]:has(#doc-tab-marker) [data-testid="stMarkdownContainer"],
 [data-testid="stColumn"]:has(#sum-tab-marker) [data-testid="stMarkdownContainer"] {
     flex: 0 0 auto !important; height: auto !important;
@@ -1062,17 +1080,10 @@ section[data-testid="stMain"] { background: var(--c-bg-page) !important; overflo
     position: relative !important;
     overflow: hidden !important;
 }
-/* Suppress Streamlit-generated scrollbars on chat column wrappers — only messages area scrolls */
-[data-testid="stColumn"]:has(#chat-col-marker) > div,
-[data-testid="stColumn"]:has(#chat-col-marker) > [data-testid="stVerticalBlockBorderWrapper"],
-[data-testid="stColumn"]:has(#chat-col-marker) > div > [data-testid="stVerticalBlock"],
-[data-testid="stColumn"]:has(#chat-col-marker) > [data-testid="stVerticalBlockBorderWrapper"] > [data-testid="stVerticalBlock"] {
-    overflow: hidden !important;
-}
-/* Messages area: absolute, fills the column above the bar (70px for bar + border) */
+/* Messages area: absolute, fills the column above the bar */
 [data-testid="stVerticalBlockBorderWrapper"]:has(#chat-messages-area) {
     position: absolute !important;
-    top: 0 !important; left: 0 !important; right: 0 !important; bottom: 70px !important;
+    top: 0 !important; left: 0 !important; right: 0 !important; bottom: var(--bar-h) !important;
     overflow: hidden !important;
     background: transparent !important; border: none !important;
     padding: 0 !important; margin: 0 !important;
@@ -1083,8 +1094,8 @@ section[data-testid="stMain"] { background: var(--c-bg-page) !important; overflo
     padding-bottom: 12px !important;
 }
 
-/* Action bar — anchored to the bottom of the fixed-height chat column */
-[data-testid="stHorizontalBlock"]:has(#action-bar-marker) {
+/* Action bar — scoped inside chat column so it never matches the main layout block */
+[data-testid="stColumn"]:has(#chat-col-marker) [data-testid="stHorizontalBlock"]:has(#action-bar-marker) {
     position: absolute !important;
     bottom: 0 !important; left: 0 !important; right: 0 !important;
     background: #ffffff !important;
@@ -1093,19 +1104,18 @@ section[data-testid="stMain"] { background: var(--c-bg-page) !important; overflo
     align-items: center !important; min-height: 68px !important;
     box-shadow: none !important; margin: 0 !important; z-index: 100 !important;
 }
-/* Columns inside the bar — prevent Streamlit's default column gap override */
-[data-testid="stHorizontalBlock"]:has(#action-bar-marker) > [data-testid="stColumn"] {
+[data-testid="stColumn"]:has(#chat-col-marker) [data-testid="stHorizontalBlock"]:has(#action-bar-marker) > [data-testid="stColumn"] {
     flex-shrink: 0 !important;
 }
-[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stBaseButton-secondary"] {
+[data-testid="stColumn"]:has(#chat-col-marker) [data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stBaseButton-secondary"] {
     background: #F3F4F6 !important; border: 1px solid var(--c-border) !important;
     border-radius: 10px !important;
     min-height: 38px !important; max-height: 38px !important; min-width: 38px !important;
     color: var(--c-text2) !important; font-size: 1.2rem !important;
     box-shadow: none !important; padding: 0 !important; transition: background 0.12s !important;
 }
-[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stBaseButton-secondary"]:hover { background: #E5E7EB !important; }
-[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stForm"] {
+[data-testid="stColumn"]:has(#chat-col-marker) [data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stBaseButton-secondary"]:hover { background: #E5E7EB !important; }
+[data-testid="stColumn"]:has(#chat-col-marker) [data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stForm"] {
     background: transparent !important; border: none !important; padding: 0 !important;
 }
 [data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stTextInputRootElement"],
@@ -1142,6 +1152,17 @@ section[data-testid="stMain"] { background: var(--c-bg-page) !important; overflo
     width: auto !important;
 }
 
+
+/* Kill Streamlit's injected top spacing at every nesting level */
+section[data-testid="stMain"] > div { margin-top: 0 !important; padding-top: 0 !important; }
+[data-testid="stMainBlockContainer"] > div,
+[data-testid="stMainBlockContainer"] > div > div { margin-top: 0 !important; padding-top: 0 !important; }
+/* Chat column inner wrappers fill full height so absolute children anchor correctly */
+[data-testid="stColumn"]:has(#chat-col-marker) > div,
+[data-testid="stColumn"]:has(#chat-col-marker) > div > [data-testid="stVerticalBlockBorderWrapper"],
+[data-testid="stColumn"]:has(#chat-col-marker) > div > [data-testid="stVerticalBlock"] {
+    height: 100% !important;
+}
 
 /* Responsive */
 @media (max-width: 768px) {
@@ -1270,7 +1291,7 @@ def main() -> None:
     if doc_col is not None:
         with doc_col:
             st.markdown('<span id="doc-col-marker"></span>', unsafe_allow_html=True)
-            coll_space, coll_col = st.columns([6, 1])
+            coll_space, coll_col = st.columns([6, 1], vertical_alignment="center")
             with coll_space:
                 st.markdown('<span id="doc-collapse-sticky-marker"></span>', unsafe_allow_html=True)
                 st.subheader("Documents")
@@ -1305,8 +1326,7 @@ def main() -> None:
         with st.container():
             st.markdown('<span id="chat-messages-area"></span>', unsafe_allow_html=True)
             render_chat(question=pending_q)
-
-        question = render_action_bar()
+            question = render_action_bar()
         if question:
             st.session_state["_bar_question"] = question
             st.rerun()
