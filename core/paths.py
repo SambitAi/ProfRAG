@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -87,3 +88,8 @@ def build_images_dir(document_folder: str | Path) -> Path:
 
 def build_sections_dir(document_folder: str | Path) -> Path:
     return Path(document_folder) / "sections"
+
+
+def compute_document_id(name: str, source_url: str | None) -> str:
+    key = f"{name}|{source_url or ''}"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]

@@ -2,34 +2,25 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import logging
 
 from core.config import load_app_config
+from core.global_index import load_global_index, write_global_index_entry
 from core.metadata import load_metadata
 from core.paths import ensure_directory, slugify_filename
 from core.storage import read_json
-from services import chat_response, extract_images, extract_tables, pdf_upload, retrieve_context, write_to_vector_db
+from services import chat_response, extract_images, extract_tables, field_extractor, metadata_cards, pdf_upload, retrieve_context, write_to_vector_db
 from services import url_ingest, web_upload
 from services import multi_doc_query
+from services import summary_watcher
+from services import retrieve_context_tree
+from services import pdf_to_markdown_pymupdf4llm as pdf_to_markdown
+from services import markdown_chunker_section_aware as markdown_chunker
 
+logger = logging.getLogger(__name__)
 
 def _config(config_path: str | Path) -> dict[str, Any]:
     return load_app_config(config_path)
-
-
-def _get_pdf_extractor(config: dict[str, Any]) -> Any:
-    if config.get("pdf", {}).get("parser") == "pymupdf4llm":
-        from services import pdf_to_markdown_pymupdf4llm as m
-    else:
-        from services import pdf_to_markdown as m
-    return m
-
-
-def _get_chunker(config: dict[str, Any]) -> Any:
-    if config.get("chunking", {}).get("strategy") == "section_aware":
-        from services import markdown_chunker_section_aware as m
-    else:
-        from services import markdown_chunker as m
-    return m
 
 
 def read_chunk(chunk_path: str | Path) -> dict[str, Any]:
@@ -78,12 +69,64 @@ def _find_document_folders(artifacts_root: str | Path) -> list[Path]:
     return sorted([path for path in root.iterdir() if path.is_dir()], key=lambda item: item.name)
 
 
+def _global_index_path(config: dict[str, Any]) -> Path:
+    return Path(config["paths"]["artifacts_root"]) / "metadata.json"
+
+
+def _build_global_entry(metadata: dict[str, Any], folder: Path) -> dict[str, Any]:
+    return {
+        "document_id": metadata.get("document_id", ""),
+        "slug": metadata.get("document_slug", folder.name),
+        "version": metadata.get("document_version", 1),
+        "document_name": metadata.get("document_name", folder.name),
+        "document_folder": str(folder),
+        "last_successful_step": metadata.get("last_successful_step", "unknown"),
+        "ready_to_chat": metadata.get("ready_to_chat", False),
+        "total_chunks": metadata.get("total_chunks", 0),
+        "document_card": metadata.get("document_card", {}),
+        "section_cards_path": metadata.get("section_cards_path", ""),
+        "summary_status": metadata.get("summary_status", "pending"),
+        "summary_ready": metadata.get("summary_ready", False),
+        "extracted_fields": metadata.get("extracted_fields", {}),
+        "extracted_fields_profile": metadata.get("extracted_fields_profile", ""),
+        "indexed_at": metadata.get("indexed_at", ""),
+    }
+
+
 def list_documents(config_path: str | Path) -> list[dict[str, Any]]:
     config = _config(config_path)
     artifacts_root = config["paths"]["artifacts_root"]
+    artifacts_root_path = Path(artifacts_root)
     documents: list[dict[str, Any]] = []
 
+    global_index = load_global_index(
+        _global_index_path(config),
+        cache_ttl_seconds=float(config.get("global_index", {}).get("cache_ttl_seconds", 5)),
+    )
+    indexed_docs = global_index.get("documents", {}) if isinstance(global_index, dict) else {}
+    indexed_keys: set[str] = set()
+
+    for folder_name, entry in indexed_docs.items():
+        if not isinstance(entry, dict):
+            continue
+        indexed_keys.add(folder_name)
+        doc_folder = entry.get("document_folder") or str(artifacts_root_path / folder_name)
+        documents.append(
+            {
+                "folder_name": folder_name,
+                "document_folder": doc_folder,
+                "document_name": entry.get("document_name", folder_name),
+                "last_successful_step": entry.get("last_successful_step", "unknown"),
+                "ready_to_chat": entry.get("ready_to_chat", False),
+                "total_chunks": entry.get("total_chunks", 0),
+                "summary_ready": entry.get("summary_ready", False),
+                "summary_status": entry.get("summary_status", "pending"),
+            }
+        )
+
     for folder in _find_document_folders(artifacts_root):
+        if folder.name in indexed_keys:
+            continue
         metadata_path = folder / "metadata.json"
         if not metadata_path.exists():
             continue
@@ -132,7 +175,7 @@ def _run_pipeline_from_metadata(config_path: str | Path, document_folder: str | 
     last_step = metadata.get("last_successful_step", "created")
 
     if last_step == "upload":
-        _get_pdf_extractor(config).run(metadata["source_pdf_path"], outputs["markdown"], document_folder)
+        pdf_to_markdown.run(metadata["source_pdf_path"], outputs["markdown"], document_folder)
         last_step = "pdf_to_markdown"
 
     extraction_cfg = config.get("extraction", {})
@@ -145,7 +188,7 @@ def _run_pipeline_from_metadata(config_path: str | Path, document_folder: str | 
         last_step = "extract_assets"
 
     if last_step == "extract_assets":
-        _get_chunker(config).run(
+        markdown_chunker.run(
             outputs["markdown"],
             outputs["chunks"],
             document_folder,
@@ -166,8 +209,18 @@ def _run_pipeline_from_metadata(config_path: str | Path, document_folder: str | 
             collection_name=config["vector_db"]["collection_name"],
             embedding_model=config["embeddings"]["model"],
             index_result_path=outputs["vector_result"],
+            chroma_host=config["vector_db"].get("host"),
+            chroma_port=int(config["vector_db"].get("port", 8000)),
         )
-        return load_metadata(document_folder)
+        field_extractor.run(document_folder, config)
+        metadata_cards.run(document_folder, config)
+        final_metadata = load_metadata(document_folder)
+        write_global_index_entry(
+            _global_index_path(config),
+            document_folder,
+            _build_global_entry(final_metadata, Path(document_folder)),
+        )
+        return final_metadata
 
     # Reached when the document was already vectorised but summarisation is incomplete.
     # Always restart: the daemon may have been killed (status stays "in_progress" on restart)
@@ -207,10 +260,6 @@ def prepare_document(
         version=version,
     )
     return _run_pipeline_from_metadata(config_path, document_folder)
-
-
-def inspect_same_url_document(config_path: str | Path, url: str) -> dict[str, Any] | None:
-    return inspect_same_name_document(config_path, url_ingest.url_to_document_name(url))
 
 
 def prepare_url_document(
@@ -293,9 +342,14 @@ def start_summarization_background(config_path: str | Path, document_folder: str
         try:
             summarize_document.run(document_folder, config)
         except Exception:
-            pass  # errors are written to metadata by summarize_document.run()
+            logger.exception("Background summarization failed for %s", document_folder)
 
     threading.Thread(target=_run, daemon=True).start()
+
+
+def start_summary_watcher(config_path: str | Path) -> None:
+    config = _config(config_path)
+    summary_watcher.start(config)
 
 
 def reset_summary_level(config_path: str | Path, document_folder: str | Path, level: str) -> None:
@@ -331,22 +385,103 @@ def reset_summary_level(config_path: str | Path, document_folder: str | Path, le
     start_summarization_background(config_path, folder)
 
 
+def _resolve_top_chunk_images(answer_payload: dict[str, Any], default_folder: str) -> list[str]:
+    """Find images near the top source chunk; return absolute, deduplicated paths.
+
+    Falls back from the chunk itself to next chunk to previous chunk, since the
+    chunk that best answers the query may not be where the image appears.
+    """
+    sources = answer_payload.get("sources", [])
+    if not sources:
+        return []
+    # In v1.1 tree retrieval, top source may not be the chunk nearest to a figure.
+    # Try several top sources and return the first successful image match.
+    raw: list[str] = []
+    for chosen in sources[:8]:
+        folder = chosen.get("document_folder") or default_folder
+        chunk_num = int(chosen.get("chunk_number", 0) or 0)
+        chunk_path = chosen.get("chunk_path", "")
+        section_path = chosen.get("section_path", "")
+
+        raw = read_chunk(chunk_path).get("image_paths", []) if chunk_path else []
+        if not raw and chunk_num:
+            raw = read_next_chunk(folder, chunk_num).get("image_paths", [])
+        if not raw and chunk_num:
+            raw = read_prev_chunk(folder, chunk_num).get("image_paths", [])
+        # Section-level fallback: choose first chunk in same section that has images.
+        if not raw and section_path:
+            meta = load_metadata(folder)
+            for cp in meta.get("chunk_paths", []):
+                c = read_json(cp, default={})
+                if (c.get("section_path") or c.get("h1") or "") == section_path and c.get("image_paths"):
+                    raw = c.get("image_paths", [])
+                    break
+        if raw:
+            break
+
+    project_root = Path(__file__).parent
+    resolved: list[str] = []
+    for p in dict.fromkeys(raw):
+        if not p:
+            continue
+        ph = Path(p)
+        abs_path = ph if ph.is_absolute() else project_root / p
+        if abs_path.exists():
+            resolved.append(str(abs_path))
+    return resolved
+
+
 def ask_question(config_path: str | Path, document_folder: str | Path, question: str) -> dict[str, Any]:
     config = _config(config_path)
     metadata = load_metadata(document_folder)
     question_count = len(list((Path(document_folder) / "chat").glob("query_*.json"))) + 1
     outputs = _artifact_paths(document_folder, question_count)
-    retrieval_context_path = retrieve_context.run(
-        question=question,
-        document_folder=document_folder,
-        chroma_persist_dir=config["vector_db"]["persist_directory"],
-        collection_name=config["vector_db"]["collection_name"],
-        embedding_model=config["embeddings"]["model"],
-        retrieval_output_path=outputs["retrieval"],
-        top_k=config["retrieval"]["top_k"],
-        media_top_k=config["retrieval"].get("media_top_k", 4),
-        expand_parent=config["retrieval"].get("expand_parent", True),
-    )
+    use_tree = bool(config.get("retrieval", {}).get("tree_traversal", False))
+    if use_tree:
+        tree = retrieve_context_tree.retrieve(question, config, selected_document_folders=[str(document_folder)])
+        retrieval_payload = {
+            "question": question,
+            "documents": tree.get("documents", []),
+            "metadatas": tree.get("metadatas", []),
+            "ids": tree.get("ids", []),
+            "media_items": [],
+            "section_media": {"image_paths": [], "table_paths": []},
+            "images_meta": [],
+            "confidence": tree.get("confidence", "normal"),
+            "mode": tree.get("mode", "specific"),
+            "abstain": tree.get("abstain", False),
+        }
+        from core.storage import write_json
+        write_json(outputs["retrieval"], retrieval_payload)
+        retrieval_context_path = str(outputs["retrieval"])
+    else:
+        retrieval_context_path = retrieve_context.run(
+            question=question,
+            document_folder=document_folder,
+            chroma_persist_dir=config["vector_db"]["persist_directory"],
+            collection_name=config["vector_db"]["collection_name"],
+            embedding_model=config["embeddings"]["model"],
+            retrieval_output_path=outputs["retrieval"],
+            top_k=config["retrieval"]["top_k"],
+            media_top_k=config["retrieval"].get("media_top_k", 4),
+            expand_parent=config["retrieval"].get("expand_parent", True),
+            chroma_host=config["vector_db"].get("host"),
+            chroma_port=int(config["vector_db"].get("port", 8000)),
+        )
+
+    retrieval_payload = read_json(retrieval_context_path, default={})
+    if retrieval_payload.get("abstain"):
+        return {
+            "question": question,
+            "answer": "I cannot answer this from the available document context.",
+            "sources": [],
+            "image_paths": [],
+            "abstain": True,
+            "confidence": retrieval_payload.get("confidence", "low"),
+            "mode": retrieval_payload.get("mode", "specific"),
+            "document_name": metadata["document_name"],
+        }
+
     answer_path = chat_response.run(
         retrieval_input_path=retrieval_context_path,
         output_answer_path=outputs["chat"],
@@ -356,4 +491,6 @@ def ask_question(config_path: str | Path, document_folder: str | Path, question:
     )
     answer_payload = read_json(answer_path, default={})
     answer_payload["document_name"] = metadata["document_name"]
+    answer_payload["image_paths"] = _resolve_top_chunk_images(answer_payload, str(document_folder))
+    answer_payload["abstain"] = False
     return answer_payload

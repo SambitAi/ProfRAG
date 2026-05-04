@@ -10,6 +10,7 @@ from core.storage import read_text, write_json
 
 _IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\((images/[^)]+)\)")
 _IMAGE_REF_FULL_RE = re.compile(r"!\[[^\]]*\]\(images/[^)]+\)")
+_HEADING_RE = re.compile(r"^(#{1,3})\s+(.*)")
 _PAGE_IN_NAME_RE = re.compile(r"_page_(\d+)_img_\d+")
 _OCR_BLOCK_START = "**----- Start of picture text -----**"
 _OCR_BLOCK_END = "**----- End of picture text -----**"
@@ -79,6 +80,24 @@ def _build_image_index(
     ocr_captions: dict[str, str],
 ) -> dict[str, Any]:
     index: dict[str, Any] = {}
+
+    def _section_path_at_line(idx: int) -> str:
+        h1: str | None = None
+        h2: str | None = None
+        h3: str | None = None
+        for k in range(0, min(idx + 1, len(lines))):
+            m = _HEADING_RE.match(lines[k].strip())
+            if not m:
+                continue
+            level = len(m.group(1))
+            text = m.group(2).strip()
+            if level == 1:
+                h1, h2, h3 = text, None, None
+            elif level == 2:
+                h2, h3 = text, None
+            elif level == 3:
+                h3 = text
+        return " > ".join(part for part in (h1, h2, h3) if part)
 
     def _nearest_text_before(idx: int) -> str | None:
         for k in range(idx - 1, -1, -1):
@@ -160,6 +179,7 @@ def _build_image_index(
                 "next_text": next_text,
                 "page": page,
                 "start_line": i,
+                "section_path": _section_path_at_line(i),
                 "isolated": not prev_text or not next_text,
                 "ref": ref,
             }

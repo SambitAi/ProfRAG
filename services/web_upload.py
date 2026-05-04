@@ -3,7 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.metadata import save_metadata
-from core.paths import build_document_folder_name, ensure_directory, next_document_version, slugify_filename
+from core.paths import (
+    build_document_folder_name,
+    compute_document_id,
+    ensure_directory,
+    next_document_version,
+    slugify_filename,
+)
 from core.storage import write_text
 
 
@@ -24,6 +30,7 @@ def save_scraped_web_page(
     metadata = {
         "document_name": document_name,
         "document_slug": slugify_filename(document_name),
+        "document_id": compute_document_id(document_name, source_url),
         "document_version": document_version,
         "document_folder": str(document_folder),
         "source_url": source_url,
