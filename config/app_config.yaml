@@ -1,34 +1,33 @@
 paths:
   artifacts_root: artifacts
 
-pdf:
-  parser: pymupdf4llm   # options: pymupdf | pymupdf4llm
+global_index:
+  cache_ttl_seconds: 5
+
+summary_watcher:
+  scan_interval_seconds: 60
+  max_workers: 2
 
 chunking:
   chunk_size: 1200
   chunk_overlap: 50
-  strategy: section_aware   # options: character_count | section_aware
 
 embeddings:
-  provider: openai
-  model: text-embedding-3-small
-  api_base_url: https://api.openai.com/v1
-  http_method: POST
+  model: text-embedding-005
 
 chat:
-  provider: openai
-  model: gpt-4.1-mini
+  model: gemini-2.5-flash-lite
   temperature: 0
-  api_base_url: https://api.openai.com/v1
-  http_method: POST
 
 vector_db:
   backend: chroma
-  collection_name: pdf_rag_chunks
-  summary_collection_name: pdf_rag_summaries
+  collection_name: pdf_rag_chunks_google_native
+  summary_collection_name: pdf_rag_summaries_google_native
+  card_collection_name: pdf_rag_cards_google_native
   persist_directory: artifacts/chroma_db
 
 retrieval:
+  tree_traversal: true
   top_k: 4
   expand_parent: true
   media_top_k: 4
@@ -45,5 +44,29 @@ prompt:
     - Mention images by caption if available.
 
 summarizer:
-  model: DeepSeek-V3.2        # Azure AI Foundry deployment name — update to match your actual deployment
+  model: DeepSeek-V3.2
   temperature: 0
+  max_parallel_sections: 1
+  retry_attempts: 5
+  retry_base_seconds: 2.0
+
+metadata_cards:
+  first_page_chars: 1200
+  section_preview_chars: 600
+  include_asset_captions: true
+  embed_on_ingest: true
+  summary_boost: 0.25
+  summary_required_for_routing: false
+
+field_extraction:
+  enabled: true
+  profiles:
+    meal_plan:
+      match_any: ["mealplan", "meal plan", "diet"]
+      fields:
+        day_number:
+          regex: "(?i)\\bday\\s+(\\d{1,2})\\b"
+          type: int
+        calories_kcal:
+          regex: "(?i)(\\d{3,4})\\s*kcal"
+          type: int

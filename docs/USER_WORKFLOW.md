@@ -1,177 +1,88 @@
-# ProfRAG — User Workflow Guide
+# Data Storage & Retrieval Workflow
 
-## Overview
+This is the single workflow reference for how data is stored and how retrieval works.
 
-ProfRAG has three fully independent parallel workflows. You can run all three at the same time:
+## 1) Ingest to Storage Flow
 
-```
-┌─────────────────────┬────────────────────────┬──────────────────────────┐
-│   LEFT PANE         │   MIDDLE PANE          │   RIGHT PANE             │
-│   Add Documents     │   Generate Summaries   │   Chat                   │
-│                     │                        │                          │
-│  Independent of     │  Independent of chat   │  Always available;       │
-│  summarization      │  and ingest            │  works on any ready doc  │
-└─────────────────────┴────────────────────────┴──────────────────────────┘
-```
+1. Input accepted (PDF or URL).
+2. Content converted to markdown.
+3. Images and tables extracted with indexes.
+4. Markdown split into section-aware chunks.
+5. Chunk/media vectors written to Chroma.
+6. Document/section cards created and indexed.
+7. Optional structured fields extracted.
+8. Metadata updated:
+   - per-document: `{doc}/metadata.json`
+   - global: `artifacts/metadata.json`
+9. Summarization runs in background (resumable).
 
----
+## 2) Storage Roles
 
-## Workflow A — Add a Document
+### `artifacts/metadata.json` (global)
+- Catalog of all documents.
+- Used to locate documents and status quickly.
+- Not used for embedding similarity search.
 
-### Option 1: Upload a PDF
-1. In the left pane, click **Add Document → Upload PDF**
-2. Drag and drop or select a `.pdf` file
-3. If a document with the same name already exists:
-   - **Reuse** — open the already-processed version, go straight to chat
-   - **Rebuild** — create a new version folder and reprocess
-4. Click **Process uploaded PDF**
-5. A spinner runs while the pipeline executes (5 stages, see below)
-6. When complete, a green dot (🟢) appears next to the document name
+### `{doc}/metadata.json` (document-level)
+- Full state for one document.
+- Stores chunk paths, summary progress, extracted fields, and pipeline checkpoints.
+- Used for resume and retrieval context mapping.
 
-### Option 2: From URL
-1. Click **Add Document → From URL**
-2. Paste any web page URL or direct PDF URL
-3. Choose Reuse / Rebuild if the URL was previously ingested
-4. Click **Process URL**
+### `chunks/*.json` (document evidence units)
+- Actual text evidence units.
+- Each chunk carries section and adjacency context (`chunk_number`, `section_path`, assets).
 
-### Pipeline stages (run once per document)
-| Stage | What it does |
-|---|---|
-| pdf_to_markdown | Converts PDF pages to structured markdown |
-| extract_images | Extracts and captions images |
-| extract_tables | Extracts tables to structured format |
-| markdown_chunker | Splits document into ~1200-character section-aware chunks |
-| write_to_vector_db | Embeds all chunks into the vector database |
+### Chroma DB
+- Stores vector embeddings and retrieval metadata.
+- Performs similarity search for query embeddings.
 
-Once **write_to_vector_db** completes → document shows 🟢 and is selectable for chat.
-Summarization starts automatically in the background (see Workflow B).
+## 3) Retrieval Traversal (Simple)
 
-### Status indicators (left pane)
-| Indicator | Meaning |
-|---|---|
-| Green ring dot | Ready to chat — fully indexed (checkbox is enabled) |
-| Red ring dot | Processing or failed — not yet selectable (checkbox is disabled) |
-| 📝 (in label) | Summaries fully generated |
-| ⏳ (in label) | Summarization in progress |
-| ❌ (in label) | Summarization failed |
-| ⟳ amber pulse badge | Summarization actively running — auto-updates every ~3 s |
+Before Chroma:
 
----
+- decide candidate docs/scope (selected docs, ready status, doc ids, paths)
+- build filters (document_id, section hints)
 
-## Workflow B — Generate Summaries
+During Chroma:
 
-Summaries are **optional** but unlock the Routing chat mode (searching across all documents by question).
+- embedding similarity search on vectors (chunks/cards/summaries)
 
-### When summaries start
-Summarization begins automatically in the background as soon as a document finishes processing. You do not need to click anything. If the daemon was killed (e.g., app restart), click **Generate Summaries** in the middle pane.
+After Chroma:
 
-### Three summary levels
-| Level | File | What it contains | When to use |
-|---|---|---|---|
-| **1-Pager** | level1_onepager.json | Single compressed overview (~1 page) | Quick document orientation |
-| **Medium** | level2_medium.json | Expanded summary across all sections | Understanding the full arc |
-| **Detailed** | level3_detailed.json | Per-section summaries | Deep review or comparison |
+- map results to human-readable source info
+- build citations/source payload
+- update/query state files as needed
 
-### Summary pipeline order
-```
-Level 3 (per section) → Index L3 → Level 2 (whole doc) → Level 1 (compressed) → Index L1
-```
-The middle pane auto-refreshes every ~3 seconds while any summarization is active — you will see the progress badge update without clicking anything.
+So the embedding query goes to Chroma, while metadata files provide control-plane context around that query.
 
-### Viewing summaries
-1. Select a document using its checkbox in the left pane
-2. In the middle pane, click **1-Pager**, **Medium**, or **Detailed**
-3. The content expands below the button row
-4. Click the active button again to collapse
-5. Click **↻ Regenerate this level** to rerun that level and all downstream levels
+## 4) Retrieval Modes
 
----
+### Single-doc
+- Retrieval is constrained to one `document_id`.
+- Top evidence chunks are returned.
+- Answer is generated from retrieved chunk context.
 
-## Workflow C — Chat
+### Multi-doc
+- Query mode is classified (`specific`, `topical`, `aggregation`).
+- Retrieval is bounded to selected docs (or routed candidates).
+- Chroma returns cross-doc chunk evidence with filters.
+- Aggregation mode can use extracted structured fields for deterministic totals.
 
-Chat is always available. Which mode activates depends on your document selection:
+## 5) Chunk + Retrieval Specifics
 
-### Mode 1: Routing (no documents selected)
-**When:** No checkboxes are ticked in the left pane.
+- Chunk files are the persisted evidence text units.
+- Chroma chunk metadata links every hit back to:
+  - `document_id`
+  - `chunk_path`
+  - `chunk_number`
+  - `section_path`
+- Tree traversal can narrow by document, then section, then chunk.
+- If section-filtered retrieval is sparse, traversal broadens to doc-level chunks.
+- Final answer uses retrieved chunk metadata for source mapping and citations.
 
-```
-Ask a question → system searches L1 + L3 summaries across all docs
-→ shows ranked candidate list with match % → you pick which docs to search
-→ switches to Deep Search mode
-```
+## 6) Reliability Behaviors
 
-Best for: "I don't know which document has what I need."
-Requires: At least some documents have summaries generated (L1 indexed).
-
-### Mode 2: Single-Document Chat
-**When:** Exactly one document checkbox is selected.
-
-```
-Ask a question → retrieves top chunks from that doc → answer + source sections
-```
-
-Sources show the section hierarchy (e.g., "3.2 Methodology → Results") and a text snippet. Images or tables from adjacent chunks are displayed if available.
-
-### Mode 3: Direct Multi-Document Chat
-**When:** Two or more document checkboxes are selected.
-
-```
-Ask a question → ranks selected docs by summary relevance → retrieves top chunks
-from up to 5 most relevant docs → single synthesized answer with per-doc citations
-```
-
-The system automatically filters to the most relevant docs — selecting 10 documents and asking a narrow question will focus on the 1–5 that are actually relevant.
-
-### Mode 4: Deep Search (post-routing)
-**When:** You confirmed routing candidates (clicked "Confirm & Search").
-
-```
-Active document set is locked → ask follow-up questions → multi-doc retrieval
-→ type /back to return to routing and change documents
-```
-
-Shortcut: Type `/back` in the chat input to exit Deep Search and return to Routing mode.
-
----
-
-## Chat mode transition map
-
-```
-No selection
-    │
-    ▼
-ROUTING MODE ──[ask question]──► show ranked candidates
-    │                                     │
-    │                        [Confirm & Search]
-    │                                     │
-    │                                     ▼
-    │                           DEEP SEARCH MODE
-    │                                     │
-    │                              [/back or
-    │                           Change Documents]
-    │◄────────────────────────────────────┘
-    │
-    │  [select 1 doc checkbox]
-    ▼
-SINGLE-DOC CHAT
-    │
-    │  [select 2+ doc checkboxes]
-    ▼
-MULTI-DOC CHAT
-    │
-    │  [Deselect All]
-    ▼
-ROUTING MODE
-```
-
----
-
-## Tips
-
-- **Collapse panes** using the ◀ button inside each pane to give chat more space. Expand with the ▶ strip on the edge.
-- **Reuse vs. Rebuild:** Reuse is instant — it skips reprocessing and jumps straight to chat. Use Rebuild only if the file has changed.
-- **Pipeline resume:** If processing was interrupted (app crash, restart), uploading the same file again automatically resumes from the last completed step.
-- **Multiple documents at once:** You can upload a second document while chatting with the first — the upload pane and chat are completely independent.
-- **Summaries don't block chat:** A document is usable for chat as soon as it shows 🟢, even if summaries are still generating.
-- **Routing accuracy:** Routing relies on L1 and L3 summaries. Documents without any summaries won't appear as routing candidates; select them manually instead.
-- **Document versions:** Rebuilding a document creates a new versioned folder (e.g., `report_v2`). Old versions remain available and selectable.
+- Metadata writes are atomic for top-level state files.
+- Document versions are isolated by `document_id`-prefixed vector IDs.
+- Summarization retries on rate limits with backoff.
+- Background summary failures are logged and can be retried.

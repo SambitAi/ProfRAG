@@ -13,6 +13,7 @@ from core.storage import read_text, write_json
 _TABLE_LINE_RE = re.compile(r"^\s*\|.*\|\s*$")
 _BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
 _IMAGE_REF_RE = re.compile(r"!\[[^\]]*\]\((images/[^)]+)\)")
+_HEADING_RE = re.compile(r"^(#{1,3})\s+(.*)")
 _PAGE_IN_NAME_RE = re.compile(r"_page_(\d+)_img_\d+")
 
 
@@ -117,6 +118,25 @@ def _infer_page(lines: list[str], start: int, window: int = 30) -> int | None:
     return None
 
 
+def _section_path_at_line(lines: list[str], idx: int) -> str:
+    h1: str | None = None
+    h2: str | None = None
+    h3: str | None = None
+    for k in range(0, min(idx + 1, len(lines))):
+        m = _HEADING_RE.match(lines[k].strip())
+        if not m:
+            continue
+        level = len(m.group(1))
+        text = m.group(2).strip()
+        if level == 1:
+            h1, h2, h3 = text, None, None
+        elif level == 2:
+            h2, h3 = text, None
+        elif level == 3:
+            h3 = text
+    return " > ".join(part for part in (h1, h2, h3) if part)
+
+
 def run(markdown_path: str | Path, document_folder: str | Path) -> list[str]:
     markdown_path = Path(markdown_path)
     document_folder = Path(document_folder)
@@ -146,6 +166,7 @@ def run(markdown_path: str | Path, document_folder: str | Path) -> list[str]:
             "csv_path": str(tpath),
             "start_line": t_start,
             "end_line": t_end,
+            "section_path": _section_path_at_line(lines, t_start),
             "caption": caption,
             "title": title,
             "headers": headers,

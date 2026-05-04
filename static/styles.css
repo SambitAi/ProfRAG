@@ -1,0 +1,342 @@
+/* Design tokens */
+:root {
+    --c-accent:    #4F6EF7;
+    --c-success:   #22C55E;
+    --c-error:     #EF4444;
+    --c-warning:   #F59E0B;
+    --c-text1:     #111827;
+    --c-text2:     #6B7280;
+    --c-border:    #E5E7EB;
+    --c-bg-page:   #F3F4F6;
+    --c-pane-doc:  #FFFFFF;
+    --c-pane-sum:  #FFFFFF;
+    --c-pane-chat: #F7F8FA;
+    --navbar-h:    52px;
+    --bar-h:       68px;
+}
+
+/* Navbar */
+.profrag-navbar {
+    position: fixed; top: 0; left: 0; right: 0;
+    height: 52px; z-index: 999999;
+    background: #ffffff;
+    border-bottom: 2px solid #000;
+    display: flex; align-items: center;
+    padding: 0 1.5rem;
+}
+.profrag-navbar-title {
+    color: var(--c-text1);
+    font-size: 1.1rem; font-weight: 700; letter-spacing: 0.01em;
+    font-family: 'Inter','Segoe UI',system-ui,sans-serif;
+}
+
+/* Page lock */
+html, body, .stApp { overflow: hidden !important; height: 100% !important; }
+section[data-testid="stMain"] { background: var(--c-bg-page) !important; overflow: hidden !important; padding-bottom: 0 !important; margin-bottom: 0 !important; }
+section[data-testid="stMain"] > div { padding-bottom: 0 !important; margin-bottom: 0 !important; padding-top: 0 !important; margin-top: 0 !important; }
+
+/* Main layout */
+[data-testid="stMainBlockContainer"], .block-container {
+    padding: var(--navbar-h) 0 0 0 !important; max-width: 100% !important;
+}
+[data-testid="stMainBlockContainer"] > div,
+[data-testid="stMainBlockContainer"] > div > div { margin-top: 0 !important; padding-top: 0 !important; }
+/* #chat-col-marker is always present — reliably targets the main 3-column block */
+[data-testid="stHorizontalBlock"]:has(#chat-col-marker),
+[data-testid="stHorizontalBlock"]:has(#doc-col-marker),
+[data-testid="stHorizontalBlock"]:has(#doc-tab-marker) {
+    margin-top: 0 !important; padding-top: 0 !important;
+    margin-bottom: 0 !important; padding-bottom: 0 !important;
+    gap: 0 !important; column-gap: 0 !important; align-items: stretch !important;
+}
+/* Zero only horizontal padding on column flex items — don't touch vertical/margin */
+[data-testid="stHorizontalBlock"]:has(#chat-col-marker) > [data-testid="stColumn"],
+[data-testid="stHorizontalBlock"]:has(#doc-col-marker) > [data-testid="stColumn"],
+[data-testid="stHorizontalBlock"]:has(#doc-tab-marker) > [data-testid="stColumn"] {
+    padding-left: 0 !important; padding-right: 0 !important;
+}
+
+/* Pane heights */
+[data-testid="stColumn"]:has(#doc-col-marker),
+[data-testid="stColumn"]:has(#summary-pane-marker),
+[data-testid="stColumn"]:has(#chat-col-marker),
+[data-testid="stColumn"]:has(#doc-tab-marker),
+[data-testid="stColumn"]:has(#sum-tab-marker) {
+    height: calc(100vh - var(--navbar-h)) !important; overflow: hidden;
+}
+[data-testid="stColumn"]:has(#doc-col-marker),
+[data-testid="stColumn"]:has(#summary-pane-marker) {
+    overflow-y: auto !important; overflow-x: hidden !important;
+}
+
+/* Doc pane: white */
+[data-testid="stColumn"]:has(#doc-col-marker) {
+    background: var(--c-pane-doc) !important;
+    border-radius: 0 !important;
+    border-right: 1px solid #000 !important;
+}
+[data-testid="stColumn"]:has(#doc-col-marker) > div { padding-left: 0.875rem !important; padding-right: 0.875rem !important; }
+[data-testid="stColumn"]:has(#doc-col-marker) p,
+[data-testid="stColumn"]:has(#doc-col-marker) span,
+[data-testid="stColumn"]:has(#doc-col-marker) h1,
+[data-testid="stColumn"]:has(#doc-col-marker) h2,
+[data-testid="stColumn"]:has(#doc-col-marker) h3,
+[data-testid="stColumn"]:has(#doc-col-marker) h4,
+[data-testid="stColumn"]:has(#doc-col-marker) label,
+[data-testid="stColumn"]:has(#doc-col-marker) small,
+[data-testid="stColumn"]:has(#doc-col-marker) li,
+[data-testid="stColumn"]:has(#doc-col-marker) strong,
+[data-testid="stColumn"]:has(#doc-col-marker) a { color: var(--c-text1) !important; }
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stCaptionContainer"] p,
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stCaptionContainer"] span { color: var(--c-text2) !important; }
+[data-testid="stColumn"]:has(#doc-col-marker) hr { border-color: var(--c-border) !important; }
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stVerticalBlockBorderWrapper"] {
+    background: transparent !important; border: none !important; box-shadow: none !important;
+}
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stTextInputRootElement"] input {
+    background: #F9FAFB !important; border: 1px solid #000 !important;
+    border-radius: 0 !important; color: var(--c-text1) !important;
+}
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stTextInputRootElement"] input::placeholder { color: var(--c-text2) !important; }
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stBaseButton-secondary"] {
+    background: transparent !important; border: none !important; box-shadow: none !important;
+    border-radius: 8px !important; color: var(--c-text1) !important;
+    text-align: left !important; font-size: 0.85rem !important; transition: background 0.12s !important;
+}
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stBaseButton-secondary"]:hover { background: #F3F4F6 !important; }
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stBaseButton-primary"] {
+    background: rgba(79,110,247,0.10) !important; color: var(--c-accent) !important;
+    border: none !important; border-radius: 8px !important; font-size: 0.85rem !important;
+    text-align: left !important; box-shadow: none !important;
+}
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stBaseButton-secondary"] p,
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stBaseButton-primary"] p {
+    overflow: hidden !important; text-overflow: ellipsis !important;
+    white-space: nowrap !important; max-width: 100% !important; margin: 0 !important;
+}
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stAlert"],
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stAlert"] p { color: var(--c-text1) !important; }
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stExpander"] summary,
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stExpander"] summary p { color: var(--c-text1) !important; }
+
+/* Sticky doc header */
+[data-testid="stHorizontalBlock"]:has(#doc-collapse-sticky-marker) {
+    position: sticky !important; top: 0 !important; z-index: 10 !important;
+    background: var(--c-pane-doc) !important; padding-bottom: 2px !important;
+    align-items: center !important;
+}
+/* Collapse/expand buttons — borderless, icon-only */
+[data-testid="stHorizontalBlock"]:has(#doc-collapse-sticky-marker) [data-testid="stBaseButton-secondary"],
+[data-testid="stHorizontalBlock"]:has(#sum-close-sticky-marker) [data-testid="stBaseButton-secondary"],
+[data-testid="stHorizontalBlock"]:has(#doc-collapse-sticky-marker) button,
+[data-testid="stHorizontalBlock"]:has(#sum-close-sticky-marker) button {
+    background: transparent !important; border: none !important; box-shadow: none !important;
+    outline: none !important; color: var(--c-text2) !important;
+    font-size: 1rem !important; padding: 4px 8px !important;
+}
+[data-testid="stHorizontalBlock"]:has(#doc-collapse-sticky-marker) [data-testid="stBaseButton-secondary"]:hover,
+[data-testid="stHorizontalBlock"]:has(#sum-close-sticky-marker) [data-testid="stBaseButton-secondary"]:hover,
+[data-testid="stHorizontalBlock"]:has(#doc-collapse-sticky-marker) button:hover,
+[data-testid="stHorizontalBlock"]:has(#sum-close-sticky-marker) button:hover {
+    background: rgba(0,0,0,0.05) !important; border: none !important;
+}
+/* Zero out h3 margin so title and button are the same height in the flex row */
+[data-testid="stHorizontalBlock"]:has(#doc-collapse-sticky-marker) h3,
+[data-testid="stHorizontalBlock"]:has(#sum-close-sticky-marker) h3 {
+    margin-top: 0 !important; margin-bottom: 0 !important; line-height: 1.2 !important;
+}
+
+/* Summary pane */
+[data-testid="stColumn"]:has(#summary-pane-marker) {
+    background: var(--c-pane-sum) !important;
+    border-radius: 0 !important;
+    border-left: 1px solid #000 !important;
+    border-right: 1px solid #000 !important;
+}
+[data-testid="stColumn"]:has(#summary-pane-marker) > div { padding-left: 0.875rem !important; padding-right: 0.875rem !important; }
+[data-testid="stColumn"]:has(#summary-pane-marker) p,
+[data-testid="stColumn"]:has(#summary-pane-marker) span,
+[data-testid="stColumn"]:has(#summary-pane-marker) label,
+[data-testid="stColumn"]:has(#summary-pane-marker) strong,
+[data-testid="stColumn"]:has(#summary-pane-marker) li { color: var(--c-text1) !important; }
+[data-testid="stColumn"]:has(#summary-pane-marker) h1,
+[data-testid="stColumn"]:has(#summary-pane-marker) h2,
+[data-testid="stColumn"]:has(#summary-pane-marker) h3,
+[data-testid="stColumn"]:has(#summary-pane-marker) h4 { color: var(--c-text1) !important; }
+[data-testid="stColumn"]:has(#summary-pane-marker) [data-testid="stCaptionContainer"] p,
+[data-testid="stColumn"]:has(#summary-pane-marker) [data-testid="stCaptionContainer"] span { color: var(--c-text2) !important; }
+[data-testid="stHorizontalBlock"]:has(#sum-close-sticky-marker) {
+    position: sticky !important; top: 0 !important; z-index: 10 !important;
+    background: var(--c-pane-sum) !important; padding-bottom: 2px !important;
+    align-items: center !important;
+}
+
+/* Chat pane */
+[data-testid="stColumn"]:has(#chat-col-marker) {
+    background: #ffffff !important;
+    border-radius: 0 !important;
+    border-left: 1px solid #000 !important;
+    position: relative !important;
+    overflow: hidden !important;
+}
+[data-testid="stColumn"]:has(#chat-col-marker) > div {
+    padding-left: 1rem !important; padding-right: 1rem !important;
+    padding-bottom: 0 !important;
+    height: 100% !important;
+}
+[data-testid="stColumn"]:has(#chat-col-marker) > div > [data-testid="stVerticalBlockBorderWrapper"],
+[data-testid="stColumn"]:has(#chat-col-marker) > div > [data-testid="stVerticalBlock"] { height: 100% !important; }
+[data-testid="stColumn"]:has(#chat-col-marker) p,
+[data-testid="stColumn"]:has(#chat-col-marker) span,
+[data-testid="stColumn"]:has(#chat-col-marker) label,
+[data-testid="stColumn"]:has(#chat-col-marker) strong,
+[data-testid="stColumn"]:has(#chat-col-marker) li { color: var(--c-text1) !important; }
+[data-testid="stColumn"]:has(#chat-col-marker) h1,
+[data-testid="stColumn"]:has(#chat-col-marker) h2,
+[data-testid="stColumn"]:has(#chat-col-marker) h3,
+[data-testid="stColumn"]:has(#chat-col-marker) h4 { color: var(--c-text1) !important; }
+[data-testid="stColumn"]:has(#chat-col-marker) [data-testid="stCaptionContainer"] p,
+[data-testid="stColumn"]:has(#chat-col-marker) [data-testid="stCaptionContainer"] span {
+    color: var(--c-text2) !important; font-size: 0.88rem !important;
+}
+
+/* Collapsed tab strips */
+[data-testid="stColumn"]:has(#doc-tab-marker) {
+    background: var(--c-pane-doc) !important; border-radius: 0 !important;
+    border-right: 1px solid #000 !important;
+    position: relative !important;
+    display: flex !important; flex-direction: column !important;
+    align-items: center !important; justify-content: center !important;
+}
+[data-testid="stColumn"]:has(#sum-tab-marker) {
+    background: var(--c-pane-sum) !important; border-radius: 0 !important;
+    border-left: 1px solid #000 !important;
+    border-right: 1px solid #000 !important;
+    position: relative !important;
+    display: flex !important; flex-direction: column !important;
+    align-items: center !important; justify-content: center !important;
+}
+[data-testid="stColumn"]:has(#doc-tab-marker)::before {
+    content: 'DOCUMENTS';
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%) rotate(-90deg);
+    color: #9CA3AF; font-size: 0.72rem; font-weight: 600;
+    letter-spacing: 0.06em; white-space: nowrap; pointer-events: none;
+}
+[data-testid="stColumn"]:has(#sum-tab-marker)::before {
+    content: 'SUMMARIES';
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%) rotate(-90deg);
+    color: #9CA3AF; font-size: 0.72rem; font-weight: 600;
+    letter-spacing: 0.06em; white-space: nowrap; pointer-events: none;
+}
+[data-testid="stColumn"]:has(#doc-tab-marker) > div,
+[data-testid="stColumn"]:has(#sum-tab-marker) > div,
+[data-testid="stColumn"]:has(#doc-tab-marker) > div > [data-testid="stVerticalBlockBorderWrapper"],
+[data-testid="stColumn"]:has(#sum-tab-marker) > div > [data-testid="stVerticalBlockBorderWrapper"] {
+    display: flex !important; flex-direction: column !important;
+    align-items: center !important; justify-content: center !important;
+    flex: 1 1 auto !important; height: 100% !important;
+}
+[data-testid="stColumn"]:has(#doc-tab-marker) [data-testid="stVerticalBlock"],
+[data-testid="stColumn"]:has(#sum-tab-marker) [data-testid="stVerticalBlock"] {
+    padding: 0 !important; gap: 0 !important;
+    display: flex !important; flex-direction: column !important;
+    align-items: center !important; justify-content: center !important;
+    height: 100% !important;
+}
+[data-testid="stColumn"]:has(#doc-tab-marker) [data-testid="stMarkdownContainer"],
+[data-testid="stColumn"]:has(#sum-tab-marker) [data-testid="stMarkdownContainer"] {
+    flex: 0 0 auto !important; height: auto !important;
+}
+[data-testid="stColumn"]:has(#doc-tab-marker) button,
+[data-testid="stColumn"]:has(#sum-tab-marker) button {
+    background: transparent !important; border: none !important; box-shadow: none !important;
+    color: var(--c-text2) !important; font-size: 1.1rem !important; font-weight: 600 !important;
+    min-height: 44px !important; width: 100% !important; padding: 6px 0 !important;
+}
+[data-testid="stColumn"]:has(#doc-tab-marker) button:hover,
+[data-testid="stColumn"]:has(#sum-tab-marker) button:hover {
+    background: rgba(0,0,0,0.04) !important; color: var(--c-text1) !important;
+}
+
+/* Summary progress pulse */
+@keyframes pulse-opacity { 0%,100%{opacity:1} 50%{opacity:0.35} }
+.summary-progress-badge {
+    display: inline-block; padding: 3px 12px; border-radius: 20px;
+    font-size: 0.78rem; font-weight: 600;
+    background: rgba(245,158,11,0.12); color: #B45309;
+    animation: pulse-opacity 2s ease-in-out infinite;
+}
+
+/* Messages area: absolute, fills the column above the bar */
+[data-testid="stVerticalBlockBorderWrapper"]:has(#chat-messages-area) {
+    position: absolute !important;
+    top: 0 !important; left: 0 !important; right: 0 !important; bottom: var(--bar-h) !important;
+    overflow: hidden !important;
+    background: transparent !important; border: none !important;
+    padding: 0 !important; margin: 0 !important;
+}
+[data-testid="stVerticalBlock"]:has(#chat-messages-area) {
+    height: 100% !important;
+    overflow-y: auto !important; overflow-x: hidden !important;
+    padding-bottom: 12px !important;
+}
+
+/* Action bar — scoped inside chat column so it never matches the main layout block */
+[data-testid="stColumn"]:has(#chat-col-marker) [data-testid="stHorizontalBlock"]:has(#action-bar-marker) {
+    position: absolute !important;
+    bottom: 0 !important; left: 0 !important; right: 0 !important;
+    background: #ffffff !important;
+    border: none !important; border-top: 1px solid #000 !important; border-radius: 0 !important;
+    padding: 12px 16px !important; gap: 12px !important;
+    align-items: center !important; min-height: 68px !important;
+    box-shadow: none !important; margin: 0 !important; z-index: 100 !important;
+}
+[data-testid="stColumn"]:has(#chat-col-marker) [data-testid="stHorizontalBlock"]:has(#action-bar-marker) > [data-testid="stColumn"] {
+    flex-shrink: 0 !important;
+}
+[data-testid="stColumn"]:has(#chat-col-marker) [data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stBaseButton-secondary"] {
+    background: #F3F4F6 !important; border: 1px solid var(--c-border) !important;
+    border-radius: 10px !important;
+    min-height: 38px !important; max-height: 38px !important; min-width: 38px !important;
+    color: var(--c-text2) !important; font-size: 1.2rem !important;
+    box-shadow: none !important; padding: 0 !important; transition: background 0.12s !important;
+}
+[data-testid="stColumn"]:has(#chat-col-marker) [data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stBaseButton-secondary"]:hover { background: #E5E7EB !important; }
+[data-testid="stColumn"]:has(#chat-col-marker) [data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stForm"] {
+    background: transparent !important; border: none !important; padding: 0 !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stTextInputRootElement"],
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stTextInputRootElement"] > div {
+    background: transparent !important; border: none !important; box-shadow: none !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stTextInputRootElement"] input {
+    border: none !important; background: transparent !important; box-shadow: none !important;
+    font-size: 0.95rem !important; color: var(--c-text1) !important; padding: 6px 10px !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stTextInputRootElement"] input:focus {
+    outline: none !important; box-shadow: none !important; border: none !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stTextInputRootElement"] label { display: none !important; }
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stFormSubmitButton"] button {
+    background: var(--c-accent) !important; color: #fff !important;
+    border-radius: 10px !important; min-height: 38px !important; max-height: 38px !important;
+    padding: 0 20px !important; border: none !important;
+    font-size: 0.9rem !important; font-weight: 600 !important;
+    box-shadow: none !important; transition: background 0.12s !important; white-space: nowrap !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stFormSubmitButton"] button:hover { background: #3B55D4 !important; }
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stForm"] [data-testid="stVerticalBlock"] {
+    display: flex !important; flex-direction: row !important;
+    align-items: center !important; gap: 6px !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stTextInputRootElement"] {
+    flex: 1 1 auto !important; min-width: 0 !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stFormSubmitButton"] {
+    flex: 0 0 auto !important; width: auto !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stFormSubmitButton"] button {
+    width: auto !important;
+}

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from core.storage import read_json, write_json
+from core.storage import read_json, write_json_atomic
 
 
 DEFAULT_LAST_SUCCESSFUL_STEP = "created"
@@ -14,7 +14,7 @@ def load_metadata(document_folder: str | Path) -> dict[str, Any]:
 
 
 def save_metadata(document_folder: str | Path, metadata: dict[str, Any]) -> None:
-    write_json(Path(document_folder) / "metadata.json", metadata)
+    write_json_atomic(Path(document_folder) / "metadata.json", metadata)
 
 
 def mark_step_success(

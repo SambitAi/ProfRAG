@@ -12,3 +12,6 @@ requests
 crawl4ai
 llama-index-core
 llama-index-llms-azure-openai
+google-auth
+google-genai
+FlagEmbedding
