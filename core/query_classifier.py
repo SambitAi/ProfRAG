@@ -4,7 +4,7 @@ import re
 
 
 _AGG_RE = re.compile(
-    r"\b(total|sum|aggregate|overall|across all|compare all|combined|average|avg|min|max|count)\b",
+    r"\b(total|sum|aggregate|across all|compare all|average|avg|min|max|count)\b",
     re.IGNORECASE,
 )
 _TOPICAL_RE = re.compile(
@@ -22,4 +22,3 @@ def classify_query(question: str) -> str:
     if _TOPICAL_RE.search(text):
         return "topical"
     return "specific"
-

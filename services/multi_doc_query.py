@@ -12,7 +12,6 @@ from core.llm import get_openai_client
 from core.metadata import load_metadata
 from core.query_classifier import classify_query
 from core.paths import ensure_directory
-from core.retrieval_engine import run_retrieval
 from core.storage import read_json, write_json
 from core.tree_retrieval import retrieve_tree
 from services import aggregation
@@ -38,7 +37,8 @@ def _lexical_overlap_score(query: str, *fields: str) -> float:
     hay = " ".join(f or "" for f in fields).lower()
     if not hay.strip():
         return 0.0
-    hits = sum(1 for t in q if t in hay)
+    hay_terms = set(_TOKEN_RE.findall(hay))
+    hits = sum(1 for t in q if t in hay_terms)
     return hits / len(q)
 
 
@@ -166,15 +166,29 @@ def _find_relevant_documents_card_first(
         cache_ttl_seconds=float(config.get("global_index", {}).get("cache_ttl_seconds", 5)),
     )
     docs_map = (global_index or {}).get("documents", {}) or {}
+    doc_folders = [v.get("document_folder", "") for v in docs_map.values() if v.get("document_folder")]
     doc_ids = [v.get("document_id", "") for v in docs_map.values() if v.get("document_id")]
-    if not doc_ids:
+    if not doc_ids and not doc_folders:
         return []
 
-    cards = chroma_client.get_collection(name=card_collection_name)
+    cards = chroma_client.get_or_create_collection(name=card_collection_name)
+    try:
+        cards_count = int(cards.count())
+    except Exception:
+        cards_count = 0
+    if cards_count <= 0:
+        return []
+    doc_n_results = min(min(max(len(doc_ids), 8), 50), cards_count)
+    if doc_n_results <= 0:
+        return []
+    if doc_ids:
+        doc_where: dict[str, Any] = {"$and": [{"card_type": {"$eq": "document"}}, {"document_id": {"$in": doc_ids}}]}
+    else:
+        doc_where = {"$and": [{"card_type": {"$eq": "document"}}, {"document_folder": {"$in": doc_folders}}]}
     doc_res = cards.query(
         query_embeddings=[query_embedding],
-        n_results=min(max(len(doc_ids), 8), 50),
-        where={"$and": [{"card_type": {"$eq": "document"}}, {"document_id": {"$in": doc_ids}}]},
+        n_results=doc_n_results,
+        where=doc_where,
     )
     doc_metas = (doc_res.get("metadatas") or [[]])[0]
     doc_distances = (doc_res.get("distances") or [[]])[0]
@@ -214,9 +228,12 @@ def _find_relevant_documents_card_first(
         return []
 
     top_folders = sorted(best_docs, key=lambda f: best_docs[f]["score"], reverse=True)[:8]
+    sec_n_results = min(min(len(top_folders) * 3, 24), cards_count)
+    if sec_n_results <= 0:
+        sec_n_results = 1
     sec_res = cards.query(
         query_embeddings=[query_embedding],
-        n_results=min(len(top_folders) * 3, 24),
+        n_results=sec_n_results,
         where={"$and": [{"card_type": {"$eq": "section"}}, {"document_folder": {"$in": top_folders}}]},
     )
     sec_metas = (sec_res.get("metadatas") or [[]])[0]
@@ -249,6 +266,7 @@ def find_relevant_documents(question: str, config: dict[str, Any]) -> list[dict[
     collection_name = config["vector_db"].get("summary_collection_name", "pdf_rag_summaries")
 
     chroma_client = _get_chroma_client(config)
+    query_embedding: list[float] | None = None
     try:
         resp = client.embeddings.create(model=embedding_model, input=[question])
         query_embedding = resp.data[0].embedding
@@ -259,19 +277,27 @@ def find_relevant_documents(question: str, config: dict[str, Any]) -> list[dict[
         logger.warning("Card-first candidate routing failed; using summary fallback.")
 
     try:
-        collection = chroma_client.get_collection(name=collection_name)
+        collection = chroma_client.get_or_create_collection(name=collection_name)
     except Exception:
-        logger.warning("Summary collection '%s' not found — no summaries indexed yet.", collection_name)
+        logger.warning("Summary collection '%s' is unavailable; returning empty candidates.", collection_name)
         return []
 
     # ── Stage 1: Level 1 filter — top-20 unique documents ───────────────────
     stage1_folders: list[str] = []
+    summary_count = 0
     try:
-        resp = client.embeddings.create(model=embedding_model, input=[question])
-        query_embedding = resp.data[0].embedding
+        if query_embedding is None:
+            resp = client.embeddings.create(model=embedding_model, input=[question])
+            query_embedding = resp.data[0].embedding
+        try:
+            summary_count = int(collection.count())
+        except Exception:
+            summary_count = 0
+        if summary_count <= 0:
+            return []
         result = collection.query(
             query_embeddings=[query_embedding],
-            n_results=20,
+            n_results=min(20, summary_count),
             where={"level": {"$eq": "1"}},
         )
         metas = (result.get("metadatas") or [[]])[0]
@@ -305,7 +331,7 @@ def find_relevant_documents(question: str, config: dict[str, Any]) -> list[dict[
 
         result2 = collection.query(
             query_embeddings=[query_embedding],
-            n_results=min(10, len(stage1_folders) * 3),
+            n_results=min(10, len(stage1_folders) * 3, summary_count),
             where=where_filter,
         )
         metas2 = (result2.get("metadatas") or [[]])[0]
@@ -367,55 +393,6 @@ def find_relevant_documents(question: str, config: dict[str, Any]) -> list[dict[
     return candidates
 
 
-def _score_folders_by_summary(
-    question: str,
-    document_folders: list[str],
-    config: dict[str, Any],
-) -> list[str]:
-    """Return document_folders ranked by L1 summary relevance to the question.
-
-    Folders whose L1 summary is not yet indexed are appended at the end unranked.
-    On any error the original list is returned unchanged.
-    """
-    if len(document_folders) <= 1:
-        return document_folders
-
-    try:
-        client = get_openai_client()
-        embedding_model = config["embeddings"]["model"]
-        collection_name = config["vector_db"].get("summary_collection_name", "pdf_rag_summaries")
-        chroma_client = _get_chroma_client(config)
-        collection = chroma_client.get_collection(name=collection_name)
-
-        resp = client.embeddings.create(model=embedding_model, input=[question])
-        query_embedding = resp.data[0].embedding
-
-        where_filter: dict[str, Any] = {"$and": [
-            {"level": {"$eq": "1"}},
-            {"document_folder": {"$in": document_folders}},
-        ]}
-
-        result = collection.query(
-            query_embeddings=[query_embedding],
-            n_results=min(len(document_folders), 50),
-            where=where_filter,
-        )
-        metas = (result.get("metadatas") or [[]])[0]
-        distances = (result.get("distances") or [[]])[0]
-
-        scored: dict[str, float] = {}
-        for meta, dist in zip(metas, distances):
-            folder = meta.get("document_folder", "")
-            if folder and folder not in scored:
-                scored[folder] = 1.0 - float(dist)
-
-        ranked = sorted(scored, key=lambda f: scored[f], reverse=True)
-        unranked = [f for f in document_folders if f not in scored]
-        return ranked + unranked
-
-    except Exception:
-        logger.warning("Summary scoring failed — using original folder order.")
-        return document_folders
 
 
 def ask_across_documents(
@@ -423,108 +400,67 @@ def ask_across_documents(
     document_folders: list[str],
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Retrieve real chunks from the most relevant documents and generate an answer.
-
-    In legacy mode, documents are pre-ranked by L1 summary similarity before chunk
-    retrieval. In tree mode, tree traversal performs its own routing.
-    Sources include doc name, section, chunk number, and a text snippet for UI display.
-    """
+    """Retrieve chunks across selected documents and generate an answer via tree traversal."""
     retrieval_cfg = config.get("retrieval", {})
-    use_tree = bool(retrieval_cfg.get("tree_traversal", False))
     mode = classify_query(question)
     max_docs = retrieval_cfg.get("multi_doc_max_docs", 5)
-    if use_tree:
-        # Tree routing is card-first and should not depend on summary collection ranking.
-        document_folders = document_folders[:max_docs]
-    else:
-        document_folders = _score_folders_by_summary(question, document_folders, config)[:max_docs]
+    selected_doc_count = len(document_folders)
+    document_folders = document_folders[:max_docs]
+    effective_doc_count = len(document_folders)
+    truncated_doc_count = max(0, selected_doc_count - effective_doc_count)
 
     if mode == "aggregation":
-        return aggregation.aggregate(question, document_folders, config)
+        payload = aggregation.aggregate(question, document_folders, config)
+        payload["selected_doc_count"] = selected_doc_count
+        payload["effective_doc_count"] = effective_doc_count
+        payload["truncated_doc_count"] = truncated_doc_count
+        payload["retrieved_doc_count"] = 0
+        payload["failed_retrievals"] = []
+        payload["retrieval_error"] = False
+        return payload
 
     client = get_openai_client()
     all_context_blocks: list[str] = []
     all_sources: list[dict[str, Any]] = []
-    doc_names: list[str] = []
+    retrieved_folders: set[str] = set()
 
-    if use_tree:
-        tree = retrieve_tree(question, config, selected_document_folders=document_folders)
-        if tree.get("abstain"):
-            return {
-                "question": question,
-                "answer": "I cannot answer this from the available documents.",
-                "sources": [],
-                "multi_doc": True,
-                "document_names": [],
-                "confidence": tree.get("confidence", "low"),
-                "mode": tree.get("mode", "specific"),
-            }
-        docs = tree.get("documents", [])
-        metas = tree.get("metadatas", [])
-        for text, meta in zip(docs, metas):
-            doc_name = meta.get("document_name", "")
-            folder = meta.get("document_folder", "")
-            section_path = meta.get("section_path", "")
-            chunk_num = meta.get("chunk_number", "?")
-            label = f"{doc_name} > {section_path}" if section_path else f"{doc_name}, Chunk {chunk_num}"
-            all_context_blocks.append(f"[Source: {label}]\n{text}")
-            all_sources.append({
-                "document_name": doc_name,
-                "document_folder": folder,
-                "section_path": section_path,
-                "chunk_number": chunk_num,
-                "chunk_text_snippet": text[:150],
-                "chunk_path": meta.get("chunk_path", ""),
-            })
-        doc_names = sorted({s.get("document_name", "") for s in all_sources if s.get("document_name")})
-
-    if not use_tree:
-        for folder in document_folders:
-            folder_path = Path(folder)
-            metadata = load_metadata(folder_path)
-            doc_name = metadata.get("document_name", folder_path.name)
-            doc_names.append(doc_name)
-
-            retrieval_dir = folder_path / "retrieval"
-            ensure_directory(retrieval_dir)
-            existing = list(retrieval_dir.glob("multidoc_*.json"))
-            retrieval_path = retrieval_dir / f"multidoc_{len(existing) + 1:06d}.json"
-
-            try:
-                run_retrieval(
-                    question=question,
-                    document_folder=folder,
-                    chroma_persist_dir=config["vector_db"]["persist_directory"],
-                    collection_name=config["vector_db"]["collection_name"],
-                    embedding_model=config["embeddings"]["model"],
-                    retrieval_output_path=retrieval_path,
-                    top_k=config["retrieval"]["top_k"],
-                    media_top_k=config["retrieval"].get("media_top_k", 4),
-                    expand_parent=config["retrieval"].get("expand_parent", True),
-                    chroma_host=config["vector_db"].get("host"),
-                    chroma_port=int(config["vector_db"].get("port", 8000)),
-                )
-            except Exception:
-                logger.warning("Retrieval failed for document %s", folder)
-                continue
-
-            payload = read_json(retrieval_path, default={})
-            texts = payload.get("documents", [])
-            metas = payload.get("metadatas", [])
-
-            for text, meta in zip(texts, metas):
-                section_path = meta.get("section_path", "")
-                chunk_num = meta.get("chunk_number", "?")
-                label = f"{doc_name} > {section_path}" if section_path else f"{doc_name}, Chunk {chunk_num}"
-                all_context_blocks.append(f"[Source: {label}]\n{text}")
-                all_sources.append({
-                    "document_name": doc_name,
-                    "document_folder": folder,
-                    "section_path": section_path,
-                    "chunk_number": chunk_num,
-                    "chunk_text_snippet": text[:150],
-                    "chunk_path": meta.get("chunk_path", ""),
-                })
+    tree = retrieve_tree(question, config, selected_document_folders=document_folders)
+    if tree.get("abstain"):
+        return {
+            "question": question,
+            "answer": "I cannot answer this from the available documents.",
+            "sources": [],
+            "multi_doc": True,
+            "document_names": [],
+            "confidence": tree.get("confidence", "low"),
+            "mode": tree.get("mode", "specific"),
+            "selected_doc_count": selected_doc_count,
+            "effective_doc_count": effective_doc_count,
+            "truncated_doc_count": truncated_doc_count,
+            "retrieved_doc_count": 0,
+            "failed_retrievals": [],
+            "retrieval_error": False,
+        }
+    docs = tree.get("documents", [])
+    metas = tree.get("metadatas", [])
+    for text, meta in zip(docs, metas):
+        doc_name = meta.get("document_name", "")
+        folder = meta.get("document_folder", "")
+        if folder:
+            retrieved_folders.add(folder)
+        section_path = meta.get("section_path", "")
+        chunk_num = meta.get("chunk_number", "?")
+        label = f"{doc_name} > {section_path}" if section_path else f"{doc_name}, Chunk {chunk_num}"
+        all_context_blocks.append(f"[Source: {label}]\n{text}")
+        all_sources.append({
+            "document_name": doc_name,
+            "document_folder": folder,
+            "section_path": section_path,
+            "chunk_number": chunk_num,
+            "chunk_text_snippet": text[:150],
+            "chunk_path": meta.get("chunk_path", ""),
+        })
+    doc_names = sorted({s.get("document_name", "") for s in all_sources if s.get("document_name")})
 
     if not all_context_blocks:
         return {
@@ -533,6 +469,12 @@ def ask_across_documents(
             "sources": [],
             "multi_doc": True,
             "document_names": doc_names,
+            "selected_doc_count": selected_doc_count,
+            "effective_doc_count": effective_doc_count,
+            "truncated_doc_count": truncated_doc_count,
+            "retrieved_doc_count": len(retrieved_folders),
+            "failed_retrievals": [],
+            "retrieval_error": False,
         }
 
     context = "\n\n".join(all_context_blocks)
@@ -572,7 +514,6 @@ def ask_across_documents(
                 answer = fallback
                 citation_warning = f"citation check repaired with fallback tags ({reason}; {reason2})"
             else:
-                # Do not hard-abstain immediately; return answer with warning so user still gets utility.
                 citation_warning = f"citation check weak: {reason}; repair pass: {reason2}; fallback: {reason3}"
 
     payload = {
@@ -581,6 +522,12 @@ def ask_across_documents(
         "sources": all_sources,
         "multi_doc": True,
         "document_names": doc_names,
+        "selected_doc_count": selected_doc_count,
+        "effective_doc_count": effective_doc_count,
+        "truncated_doc_count": truncated_doc_count,
+        "retrieved_doc_count": len(retrieved_folders),
+        "failed_retrievals": [],
+        "retrieval_error": False,
     }
     if citation_warning:
         payload["citation_warning"] = citation_warning

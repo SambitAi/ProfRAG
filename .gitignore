@@ -6,3 +6,4 @@ __pycache__/
 artifacts/
 .claude/
 graphify-out/
+tests/

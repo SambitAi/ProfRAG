@@ -26,7 +26,9 @@ def _candidate_docs(artifacts_root: Path) -> list[Path]:
         if not m.exists():
             continue
         meta = load_metadata(p)
-        if meta.get("ready_to_chat") and meta.get("summary_status") in ("pending", "in_progress", None):
+        # Only pick pending/unknown docs. In-progress docs are skipped via metadata status,
+        # with in-process duplicate protection also enforced in summarize_document.run().
+        if meta.get("ready_to_chat") and meta.get("summary_status") in ("pending", None):
             out.append(p)
     return out
 
@@ -67,4 +69,3 @@ def start(config: dict[str, Any]) -> None:
 
 def stop() -> None:
     _STOP_EVENT.set()
-
