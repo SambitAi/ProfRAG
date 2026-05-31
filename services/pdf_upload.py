@@ -5,7 +5,6 @@ from pathlib import Path
 from core.metadata import save_metadata
 from core.paths import (
     build_document_folder_name,
-    compute_document_id,
     ensure_directory,
     next_document_version,
     slugify_filename,
@@ -28,7 +27,7 @@ def save_uploaded_pdf(
     metadata = {
         "document_name": original_file_name,
         "document_slug": slugify_filename(original_file_name),
-        "document_id": compute_document_id(original_file_name, ""),
+        "document_id": document_folder.name,
         "document_version": document_version,
         "document_folder": str(document_folder),
         "source_pdf_path": str(source_path),

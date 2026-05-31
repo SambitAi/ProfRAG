@@ -1,4 +1,7 @@
 streamlit
+fastapi
+uvicorn[standard]
+python-multipart
 openai
 PyMuPDF
 pymupdf4llm

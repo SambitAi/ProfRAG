@@ -177,7 +177,7 @@ class _GoogleNativeClient:
         self.chat = _GoogleNativeClient._Chat(self)
 
 
-def _normalize_azure_endpoint(endpoint: str) -> str:
+def _normalize_provider_endpoint(endpoint: str) -> str:
     value = endpoint.strip()
     if not value:
         return value
@@ -186,7 +186,7 @@ def _normalize_azure_endpoint(endpoint: str) -> str:
     if not parsed.scheme or not parsed.netloc:
         return value.rstrip("/")
 
-    # Accept full Azure OpenAI URLs and reduce them to resource root.
+    # Accept full provider URLs and reduce them to resource root.
     # Example input:
     # https://my-resource.cognitiveservices.azure.com/openai/deployments/x/chat/completions?api-version=...
     # Output:
@@ -217,7 +217,7 @@ def get_openai_client(purpose: str = "default") -> Any:
             raise RuntimeError("LLM_PROVIDER=azure requires AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT.")
         return AzureOpenAI(
             api_key=azure_api_key,
-            azure_endpoint=_normalize_azure_endpoint(azure_endpoint),
+            azure_endpoint=_normalize_provider_endpoint(azure_endpoint),
             api_version=azure_api_version,
         )
 
@@ -258,13 +258,6 @@ def get_openai_client(purpose: str = "default") -> Any:
             endpoint_id=google_endpoint_id,
         )
 
-    if azure_api_key and azure_endpoint:
-        return AzureOpenAI(
-            api_key=azure_api_key,
-            azure_endpoint=_normalize_azure_endpoint(azure_endpoint),
-            api_version=azure_api_version,
-        )
-
     if api_key:
         return OpenAI(api_key=api_key)
 
@@ -302,7 +295,8 @@ def get_openai_client(purpose: str = "default") -> Any:
         )
 
     raise RuntimeError(
-        "No API key found. Set one of: OPENAI_API_KEY, "
+        "No API key found. Set LLM_PROVIDER explicitly (openai|google|google_native|azure) "
+        "and provide matching credentials. Examples: OPENAI_API_KEY, "
         "AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT, "
         "or Google ADC (GOOGLE_CLOUD_PROJECT + gcloud ADC login), "
         "or GOOGLE_API_KEY."

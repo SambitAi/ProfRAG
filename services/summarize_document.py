@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import logging
+import re
 import threading
 import time
 from pathlib import Path
@@ -12,8 +14,8 @@ import chromadb
 from core.llm import get_openai_client
 from core.global_index import write_global_index_entry
 from core.metadata import load_metadata, mark_summary_complete, update_summary_progress
-from core.paths import compute_document_id, ensure_directory
-from core.storage import read_json, write_json
+from core.paths import ensure_directory
+from core.storage import read_json, write_json, write_json_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +23,18 @@ _MAX_CHARS_PER_CALL = 50_000
 _DEFAULT_RETRY_ATTEMPTS = 5
 _DEFAULT_RETRY_BASE_SECONDS = 2.0
 
+_RUN_LOCK = threading.Lock()
+_ACTIVE_SUMMARY_RUNS: set[str] = set()
+
 
 def _is_rate_limited_error(exc: Exception) -> bool:
     status_code = getattr(exc, "status_code", None)
-    text = str(exc)
-    return status_code == 429 or "RESOURCE_EXHAUSTED" in text or "429" in text
+    text = str(exc or "")
+    if status_code == 429:
+        return True
+    if "RESOURCE_EXHAUSTED" in text:
+        return True
+    return bool(re.search(r"\b429\b", text))
 
 
 def _get_chroma_client(config: dict[str, Any]) -> chromadb.ClientAPI:
@@ -143,10 +152,7 @@ def _merge_summaries_into_cards(document_folder: Path, config: dict[str, Any]) -
     Embeddings remain in Chroma. We only store summary text and summary vector IDs.
     """
     meta = load_metadata(document_folder)
-    document_id = meta.get("document_id") or compute_document_id(
-        meta.get("document_name", document_folder.name),
-        meta.get("source_url", ""),
-    )
+    document_id = meta.get("document_id") or document_folder.name
 
     level1_data = read_json(document_folder / "summaries" / "level1_onepager.json", default={})
     level3_data = read_json(document_folder / "summaries" / "level3_detailed.json", default={"sections": []})
@@ -249,9 +255,17 @@ def _run_level3(document_folder: Path, config: dict[str, Any], progress: dict) -
             logger.exception("Level 3 summarization failed for section '%s'", h1)
             raise
         with lock:
-            current = read_json(level3_path, default={"sections": []})
+            try:
+                current = read_json(level3_path, default={"sections": []})
+            except json.JSONDecodeError:
+                logger.warning("Corrupt Level 3 summary JSON at %s; resetting file.", level3_path)
+                current = {"sections": []}
+            if not isinstance(current, dict):
+                current = {"sections": []}
+            if not isinstance(current.get("sections"), list):
+                current["sections"] = []
             current["sections"].append({"section": h1, "summary": summary})
-            write_json(level3_path, current)
+            write_json_atomic(level3_path, current)
             done_sections.add(h1)
             update_summary_progress(document_folder, "level3_sections_done", list(done_sections))
 
@@ -302,7 +316,7 @@ def _run_lower_level(
         retry_attempts=retry_attempts,
         retry_base_seconds=retry_base_seconds,
     )
-    write_json(document_folder / "summaries" / _LEVEL_OUTPUT_FILES[level], {"summary": summary})
+    write_json_atomic(document_folder / "summaries" / _LEVEL_OUTPUT_FILES[level], {"summary": summary})
     update_summary_progress(document_folder, f"level{level}_complete", True)
 
 
@@ -327,7 +341,7 @@ def _index_summaries(document_folder: Path, level: int, config: dict[str, Any]) 
 
     metadata_doc = load_metadata(document_folder)
     doc_name = metadata_doc.get("document_name", document_folder.name)
-    document_id = metadata_doc.get("document_id") or compute_document_id(doc_name, metadata_doc.get("source_url", ""))
+    document_id = metadata_doc.get("document_id") or document_folder.name
     folder_str = str(document_folder)
 
     if level == 1:
@@ -374,6 +388,12 @@ def _index_summaries(document_folder: Path, level: int, config: dict[str, Any]) 
 
 def run(document_folder: str | Path, config: dict[str, Any]) -> None:
     document_folder = Path(document_folder)
+    run_key = str(document_folder.resolve())
+    with _RUN_LOCK:
+        if run_key in _ACTIVE_SUMMARY_RUNS:
+            logger.info("Summarization already active for %s; skipping duplicate trigger.", document_folder.name)
+            return
+        _ACTIVE_SUMMARY_RUNS.add(run_key)
     ensure_directory(document_folder / "summaries")
 
     metadata = load_metadata(document_folder)
@@ -435,3 +455,6 @@ def run(document_folder: str | Path, config: dict[str, Any]) -> None:
         save_metadata(document_folder, meta)
         logger.exception("Summarization failed for %s", document_folder.name)
         raise
+    finally:
+        with _RUN_LOCK:
+            _ACTIVE_SUMMARY_RUNS.discard(run_key)

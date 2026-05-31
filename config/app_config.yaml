@@ -13,7 +13,7 @@ chunking:
   chunk_overlap: 50
 
 embeddings:
-  model: text-embedding-005
+  model: gemini-embedding-001
 
 chat:
   model: gemini-2.5-flash-lite
@@ -21,13 +21,13 @@ chat:
 
 vector_db:
   backend: chroma
-  collection_name: pdf_rag_chunks_google_native
-  summary_collection_name: pdf_rag_summaries_google_native
-  card_collection_name: pdf_rag_cards_google_native
+  auto_collection_suffix: false
+  collection_name: pdf_rag_chunks_google_native_gemini_embedding_001
+  summary_collection_name: pdf_rag_summaries_google_native_gemini_embedding_001
+  card_collection_name: pdf_rag_cards_google_native_gemini_embedding_001
   persist_directory: artifacts/chroma_db
 
 retrieval:
-  tree_traversal: true
   top_k: 4
   expand_parent: true
   media_top_k: 4
@@ -44,7 +44,7 @@ prompt:
     - Mention images by caption if available.
 
 summarizer:
-  model: DeepSeek-V3.2
+  model: gemini-2.5-flash-lite
   temperature: 0
   max_parallel_sections: 1
   retry_attempts: 5
@@ -60,13 +60,5 @@ metadata_cards:
 
 field_extraction:
   enabled: true
-  profiles:
-    meal_plan:
-      match_any: ["mealplan", "meal plan", "diet"]
-      fields:
-        day_number:
-          regex: "(?i)\\bday\\s+(\\d{1,2})\\b"
-          type: int
-        calories_kcal:
-          regex: "(?i)(\\d{3,4})\\s*kcal"
-          type: int
+  profiles: {}
+

@@ -6,7 +6,7 @@ import chromadb
 
 from core.llm import get_openai_client
 from core.metadata import load_metadata, mark_step_success, save_metadata
-from core.paths import build_images_dir, build_tables_dir, compute_document_id, ensure_directory
+from core.paths import build_images_dir, build_tables_dir, ensure_directory
 from core.storage import read_json, write_json
 
 
@@ -32,9 +32,7 @@ def run(
         chroma_client = chromadb.PersistentClient(path=str(chroma_persist_dir))
     collection = chroma_client.get_or_create_collection(name=collection_name)
     metadata = load_metadata(document_folder)
-    document_name = metadata.get("document_name", document_folder.name)
-    source_url = metadata.get("source_url", "")
-    document_id = metadata.get("document_id") or compute_document_id(document_name, source_url)
+    document_id = metadata.get("document_id") or document_folder.name
     metadata["document_id"] = document_id
 
     processed_chunk_ids: list[str] = []

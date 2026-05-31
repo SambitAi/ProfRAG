@@ -1,6 +1,6 @@
-# Persistent PDF RAG (v1.1)
+﻿# Persistent PDF RAG (v1.1)
 
-Metadata-driven, multimodal RAG for PDFs and web pages that scales to large corpora, reduces token waste, and improves “needle in a haystack” retrieval by narrowing search before chunk-level retrieval.
+Metadata-driven, multimodal RAG for PDFs and web pages that scales to large corpora, reduces token waste, and improves â€œneedle in a haystackâ€ retrieval by narrowing search before chunk-level retrieval.
 
 ## What This Project Excels At
 
@@ -32,7 +32,7 @@ Metadata-driven, multimodal RAG for PDFs and web pages that scales to large corp
 ## Documentation
 
 - Architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- Data storage and retrieval workflow: [docs/USER_WORKFLOW.md](docs/USER_WORKFLOW.md)
+- Data storage and retrieval workflow: [docs/DATA_STORAGE_RETRIEVAL_WORKFLOW.md](docs/DATA_STORAGE_RETRIEVAL_WORKFLOW.md)
 
 ## Prerequisites
 
@@ -107,7 +107,6 @@ AZURE_OPENAI_API_VERSION=2025-01-01-preview
   - `vector_db.card_collection_name`
   - `vector_db.summary_collection_name`
 - Retrieval:
-  - `retrieval.tree_traversal`
   - `retrieval.top_k`
   - `retrieval.media_top_k`
 - Summary reliability:
@@ -123,3 +122,16 @@ AZURE_OPENAI_API_VERSION=2025-01-01-preview
 - If embedding dimension changes, use new Chroma collection names for compatibility.
 - If summarizer model fails or throttles, fallback and retry/backoff are applied.
 - Google native path requires `google-genai` and valid ADC or API key.
+- Collection names are auto-suffixed by embedding model by default (`vector_db.auto_collection_suffix: true`), so switching embedding models (for example 768 -> 1536) routes to a new compatible collection automatically.
+
+
+
+## v2 Refactor Notes (Reader-Friendly)
+
+- Retrieval is now unified: single-doc and multi-doc flows use the same tree-based retrieval path.
+- Multi-doc coverage improved: retrieval walks each selected document before reranking.
+- Version identity contract in code uses folder/version IDs (`<slug>_vN`) to avoid same-name/source collisions.
+- Detailed implementation summaries are archived in:
+  - `docs/v2/archive/multi_doc_retrieval_refactor_summary.md`
+  - `docs/v2/archive/api_layer_refactor_summary.md`
+

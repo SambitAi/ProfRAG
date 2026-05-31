@@ -8,7 +8,7 @@ import chromadb
 
 from core.llm import get_openai_client
 from core.metadata import load_metadata, save_metadata
-from core.paths import compute_document_id, ensure_directory
+from core.paths import ensure_directory
 from core.storage import read_json, read_text, write_json
 
 
@@ -159,8 +159,7 @@ def build_document_card(document_folder: str | Path, config: dict[str, Any]) -> 
     cfg = _cfg(config)
     markdown = read_text(_markdown_path(folder, metadata))
     document_name = metadata.get("document_name", folder.name)
-    source_url = metadata.get("source_url", "")
-    document_id = metadata.get("document_id") or compute_document_id(document_name, source_url)
+    document_id = metadata.get("document_id") or folder.name
 
     title = _first_heading(markdown) or document_name
     opening_text = _first_nonempty_paragraph(markdown)
@@ -197,9 +196,7 @@ def build_section_index(document_folder: str | Path, config: dict[str, Any]) -> 
     metadata = load_metadata(folder)
     cfg = _cfg(config)
     sections_dir = folder / "sections"
-    document_name = metadata.get("document_name", folder.name)
-    source_url = metadata.get("source_url", "")
-    document_id = metadata.get("document_id") or compute_document_id(document_name, source_url)
+    document_id = metadata.get("document_id") or folder.name
 
     chunk_by_id: dict[str, dict[str, Any]] = {}
     chunk_path_by_id: dict[str, str] = {}
@@ -333,8 +330,7 @@ def run(document_folder: str | Path, config: dict[str, Any]) -> dict[str, Any]:
     folder = Path(document_folder)
     metadata = load_metadata(folder)
     document_name = metadata.get("document_name", folder.name)
-    source_url = metadata.get("source_url", "")
-    document_id = metadata.get("document_id") or compute_document_id(document_name, source_url)
+    document_id = metadata.get("document_id") or folder.name
     metadata["document_id"] = document_id
 
     document_card = build_document_card(folder, config)

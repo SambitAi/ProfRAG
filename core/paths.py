@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import re
 from pathlib import Path
 
@@ -20,10 +19,13 @@ def next_document_version(artifacts_root: str | Path, file_name: str) -> int:
     root = Path(artifacts_root)
     slug = slugify_filename(file_name)
     versions: list[int] = []
+    excluded_names = {"jobs"}
 
     if root.exists():
         for child in root.iterdir():
             if not child.is_dir():
+                continue
+            if child.name.startswith(".") or child.name in excluded_names:
                 continue
             match = re.fullmatch(rf"{re.escape(slug)}_v(\d+)", child.name)
             if match:
@@ -36,6 +38,17 @@ def ensure_directory(path: str | Path) -> Path:
     directory = Path(path)
     directory.mkdir(parents=True, exist_ok=True)
     return directory
+
+
+def artifact_paths(document_folder: str | Path, question_number: int) -> dict[str, Path]:
+    folder = Path(document_folder)
+    return {
+        "markdown": folder / "markdown" / "document.md",
+        "chunks": folder / "chunks",
+        "vector_result": folder / "vector" / "index_result.json",
+        "retrieval": folder / "retrieval" / f"query_{question_number:06d}.json",
+        "chat": folder / "chat" / f"query_{question_number:06d}.json",
+    }
 
 
 def slugify_heading(heading_text: str, max_length: int = 40) -> str:
@@ -88,8 +101,3 @@ def build_images_dir(document_folder: str | Path) -> Path:
 
 def build_sections_dir(document_folder: str | Path) -> Path:
     return Path(document_folder) / "sections"
-
-
-def compute_document_id(name: str, source_url: str | None) -> str:
-    key = f"{name}|{source_url or ''}"
-    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]

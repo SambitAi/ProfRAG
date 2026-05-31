@@ -1,6 +1,6 @@
-# Architecture
+﻿# Architecture
 
-This document describes how the current system is built and how data moves through storage and retrieval.
+This document describes how the current system is built, how data moves through storage/retrieval, and what changed in the v2 retrieval refactor.
 
 ## Pipeline
 
@@ -16,7 +16,7 @@ PDF/URL ingest
   -> retrieval + answer generation
 ```
 
-`main.py` is the orchestrator. Services are independent modules.
+`workflows.py` is the orchestration layer. Services remain independently testable modules.
 
 ## Storage Model
 
@@ -38,14 +38,30 @@ artifacts/
   chroma_db/                       # local Chroma persistence (if not remote)
 ```
 
-## Retrieval Model
+## Retrieval Model (Current)
 
 - Metadata files are control-plane catalogs.
 - Chroma is the semantic retrieval plane.
 - Query flow:
-  1. Narrow scope with metadata/cards (`document_id`, section hints).
-  2. Query Chroma vectors (chunks/cards/summaries) with filters.
-  3. Rerank evidence and generate answer with source metadata.
+  1. Route candidates with metadata/cards.
+  2. For selected/routed docs, run per-doc section + chunk retrieval.
+  3. Apply reranking with per-doc retention safeguards.
+  4. Generate grounded answer with source metadata.
+
+## What Changed In V2 (For End Users)
+
+### 1) Single retrieval path
+- Single-doc and multi-doc chat now use a unified tree retrieval path.
+- Result: more consistent behavior across UI/API calls.
+
+### 2) Better multi-doc coverage
+- Retrieval now walks each selected document before reranking.
+- Rerank stage includes per-doc retention safeguards to reduce one-doc dominance.
+- Result: better chance each selected document contributes usable context.
+
+### 3) Version-safe document identity (code contract)
+- Document identity in code is folder/version-derived (`<slug>_vN`) instead of hash of name+URL.
+- Result: cleaner handling of versioned documents after re-ingest.
 
 ## Metadata Responsibilities
 
@@ -86,3 +102,7 @@ If embedding dimensionality changes, switch to new collection names for compatib
 - Runs asynchronously (watcher/background thread)
 - Resumable via metadata checkpoints
 - Rate-limit resilience via retry/backoff and configurable parallelism
+
+## Operational Note
+
+Some migration outcomes (especially versioned-doc validation across old/new artifacts) require corpus re-ingest in an environment with working provider auth/network.
