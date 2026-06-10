@@ -69,3 +69,7 @@ def reset_summary_level(config_path: str | Path, document_folder: str | Path, le
 def ask_question(config_path: str | Path, document_folder: str | Path, question: str) -> dict[str, Any]:
     return _workflows.ask_question(config_path, document_folder, question)
 
+
+def delete_documents(config_path: str | Path, folders: list[str]) -> dict[str, Any]:
+    return _workflows.delete_documents(config_path, folders)
+

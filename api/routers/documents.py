@@ -2,24 +2,23 @@
 
 import base64
 from pathlib import Path
-import shutil
 import threading
 import time
 
 from fastapi import APIRouter, Header, HTTPException, Query
 
 import workflows
-from core.config import load_app_config
 from api.deps import get_artifacts_root, get_config_path, require_existing_document_folder
 from api.schemas.documents import (
+    DeleteDocumentsRequest,
+    DeleteDocumentsResponse,
     DocumentInspectResponse,
     DocumentStatusResponse,
     IngestUrlRequest,
     SummaryResetRequest,
     UploadDocumentRequest,
 )
-from core.global_index import delete_global_index_entry, global_index_path
-from core.job_store import create_job, find_job_by_idempotency_key, list_jobs, update_job
+from core.job_store import create_job, find_job_by_idempotency_key, update_job
 
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -93,13 +92,25 @@ def _run_summary_job(job_id: str, document_folder: str, starter_fn, *starter_arg
         )
 
 
+def _delete_documents_or_raise(folders: list[str]) -> DeleteDocumentsResponse:
+    try:
+        result = workflows.delete_documents(get_config_path(), folders)
+    except workflows.DocumentDeletionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except workflows.DocumentDeletionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except workflows.DocumentDeletionValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return DeleteDocumentsResponse(**result)
+
+
 @router.get("")
 def list_documents() -> list[dict]:
     return workflows.list_documents(get_config_path())
 
 
 # IMPORTANT: keep static routes above parameterized routes to avoid path capture.
-# `/documents/inspect`, `/documents/upload`, and `/documents/ingest-url`
+# `/documents/inspect`, `/documents/upload`, `/documents/ingest-url`, and `/documents/delete`
 # must be registered before `/documents/{folder}`.
 @router.get("/inspect", response_model=DocumentInspectResponse)
 def inspect_document(file_name: str = Query(..., min_length=1)) -> DocumentInspectResponse:
@@ -158,6 +169,11 @@ def ingest_url(
         daemon=True,
     ).start()
     return {"job_id": job["job_id"], "state": job["state"]}
+
+
+@router.post("/delete", response_model=DeleteDocumentsResponse)
+def delete_documents(req: DeleteDocumentsRequest) -> DeleteDocumentsResponse:
+    return _delete_documents_or_raise(req.folders)
 
 
 @router.get("/{folder}")
@@ -293,20 +309,6 @@ def reset_summaries(
     return {"job_id": job["job_id"], "state": job["state"]}
 
 
-@router.delete("/{folder}")
-def delete_document(folder: str) -> dict:
-    document_folder = require_existing_document_folder(folder)
-    artifacts_root = get_artifacts_root()
-    active_jobs = list_jobs(artifacts_root)
-    for job in active_jobs:
-        state = str(job.get("state", ""))
-        if state not in {"pending", "running"}:
-            continue
-        payload = job.get("payload", {})
-        payload_folder = str(payload.get("folder", ""))
-        if payload_folder and payload_folder == folder:
-            raise HTTPException(status_code=409, detail="Document has active jobs; retry after completion.")
-    config = load_app_config(get_config_path())
-    delete_global_index_entry(global_index_path(config), document_folder)
-    shutil.rmtree(document_folder)
-    return {"deleted": True, "folder": folder}
+@router.delete("/{folder}", response_model=DeleteDocumentsResponse)
+def delete_document(folder: str) -> DeleteDocumentsResponse:
+    return _delete_documents_or_raise([folder])
