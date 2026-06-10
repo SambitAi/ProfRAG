@@ -104,6 +104,11 @@ section[data-testid="stMain"] > div { padding-bottom: 0 !important; margin-botto
     text-align: left !important; font-size: 0.85rem !important; transition: background 0.12s !important;
 }
 [data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stBaseButton-secondary"]:hover { background: #F3F4F6 !important; }
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stHorizontalBlock"]:has(#doc-select-actions-marker) [data-testid="stBaseButton-secondary"],
+[data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stHorizontalBlock"]:has(#delete-selected-marker) [data-testid="stBaseButton-secondary"] {
+    border: 1px solid #000 !important;
+    box-shadow: none !important;
+}
 [data-testid="stColumn"]:has(#doc-col-marker) [data-testid="stBaseButton-primary"] {
     background: rgba(79,110,247,0.10) !important; color: var(--c-accent) !important;
     border: none !important; border-radius: 8px !important; font-size: 0.85rem !important;

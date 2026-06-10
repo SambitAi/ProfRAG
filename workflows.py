@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import logging
+import shutil
 import threading
 from time import perf_counter
 from typing import Any
@@ -9,17 +10,20 @@ from typing import Any
 from core.config import load_app_config
 from core.global_index import (
     build_global_entry,
+    delete_global_index_entry,
     find_document_folders,
     find_latest_same_name_document,
     global_index_path,
     load_global_index,
     write_global_index_entry,
 )
+from core.job_store import list_jobs
 from core.locks import document_lock
 from core.metadata import load_metadata, save_metadata, update_summary_progress
 from core.paths import artifact_paths, ensure_directory
 from core.storage import read_json, write_json
 from services import chat_response, extract_images, extract_tables, field_extractor, metadata_cards, pdf_upload, write_to_vector_db
+from services import document_delete
 from services import image_render
 from services import markdown_chunker_section_aware as markdown_chunker
 from services import multi_doc_query
@@ -29,6 +33,32 @@ from services import summary_watcher
 from services import url_ingest, web_upload
 
 logger = logging.getLogger(__name__)
+
+
+class DocumentDeletionError(Exception):
+    """Base workflow-layer error for document deletion."""
+
+
+class DocumentDeletionValidationError(DocumentDeletionError):
+    """Raised when delete input is invalid."""
+
+
+class DocumentDeletionNotFoundError(DocumentDeletionError):
+    """Raised when a target document folder is missing or outside artifacts root."""
+
+
+class DocumentDeletionConflictError(DocumentDeletionError):
+    """Raised when a target document cannot be deleted due to active work."""
+
+
+def _folder_cleanup_result(folder_name: str) -> dict[str, Any]:
+    return {
+        "folder": folder_name,
+        "vector_cleanup": [],
+        "supports_where_delete": False,
+        "global_index_removed": False,
+        "filesystem_removed": False,
+    }
 
 
 def _log_workflow_enter(workflow: str, stage: str, document_id: str = "") -> float:
@@ -104,6 +134,180 @@ def list_documents(config_path: str | Path) -> list[dict[str, Any]]:
         )
 
     return sorted(documents, key=lambda item: item["folder_name"], reverse=True)
+
+
+def _resolve_document_folder_for_delete(artifacts_root: str | Path, folder: str) -> Path:
+    if not folder or not str(folder).strip():
+        raise DocumentDeletionValidationError("Folder name is required.")
+
+    root = Path(artifacts_root).resolve()
+    resolved = (root / str(folder)).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise DocumentDeletionValidationError(f"Invalid folder: {folder}") from exc
+    if not resolved.exists() or not resolved.is_dir():
+        raise DocumentDeletionNotFoundError(f"Document folder not found: {folder}")
+    return resolved
+
+
+def _iter_active_jobs(artifacts_root: str | Path) -> list[dict[str, Any]]:
+    return [
+        job for job in list_jobs(artifacts_root)
+        if str(job.get("state", "")) in {"pending", "running"}
+    ]
+
+
+def _is_documents_job_overlap(job: dict[str, Any], metadata_by_folder: dict[str, dict[str, Any]]) -> str | None:
+    job_type = str(job.get("job_type", ""))
+    if not job_type.startswith("documents."):
+        return None
+
+    payload = job.get("payload", {})
+    file_name = str(payload.get("file_name", "")).strip()
+    source_url = str(payload.get("url", "")).strip()
+
+    for folder_name, metadata in metadata_by_folder.items():
+        if not isinstance(metadata, dict) or not metadata:
+            continue
+        metadata_url = str(metadata.get("source_url", "")).strip()
+        source_pdf_path = str(metadata.get("source_pdf_path", "") or "").strip()
+        source_pdf_name = Path(source_pdf_path).name if source_pdf_path else ""
+        if file_name and file_name == source_pdf_name:
+            return folder_name
+        if source_url and metadata_url and source_url == metadata_url:
+            return folder_name
+    return None
+
+
+def _assert_no_active_folder_jobs(
+    artifacts_root: str | Path,
+    folders: set[str],
+    metadata_by_folder: dict[str, dict[str, Any]],
+) -> None:
+    for job in _iter_active_jobs(artifacts_root):
+        payload = job.get("payload", {})
+        payload_folder = str(payload.get("folder", "")).strip()
+        if payload_folder and payload_folder in folders:
+            raise DocumentDeletionConflictError(
+                f"Document '{payload_folder}' has active job '{job.get('job_type', '')}'; retry after completion."
+            )
+
+        overlapping_folder = _is_documents_job_overlap(job, metadata_by_folder)
+        if overlapping_folder:
+            raise DocumentDeletionConflictError(
+                f"Document '{overlapping_folder}' has active job '{job.get('job_type', '')}'; retry after completion."
+            )
+
+
+def delete_documents(config_path: str | Path, folders: list[str]) -> dict[str, Any]:
+    if not folders:
+        raise DocumentDeletionValidationError("At least one folder is required.")
+
+    config = load_app_config(config_path)
+    artifacts_root = config["paths"]["artifacts_root"]
+    unique_folders = list(dict.fromkeys(str(folder).strip() for folder in folders if str(folder).strip()))
+    if not unique_folders:
+        raise DocumentDeletionValidationError("At least one folder is required.")
+    delete_run_id = ",".join(unique_folders)
+    start_ts = _log_workflow_enter("documents", "delete_documents", delete_run_id)
+
+    try:
+        resolved_folders = [
+            _resolve_document_folder_for_delete(artifacts_root, folder_name)
+            for folder_name in unique_folders
+        ]
+        metadata_by_folder: dict[str, dict[str, Any]] = {}
+        for folder_name, document_folder in zip(unique_folders, resolved_folders):
+            try:
+                metadata = load_metadata(document_folder)
+            except Exception:
+                logger.exception(
+                    "document_delete_metadata_load_failed",
+                    extra={"folder": folder_name, "path": str(document_folder)},
+                )
+                metadata = {}
+            metadata_by_folder[folder_name] = metadata
+        _assert_no_active_folder_jobs(artifacts_root, set(unique_folders), metadata_by_folder)
+
+        index_path = global_index_path(config)
+        collections_cleaned: list[str] = []
+        global_index_removed: list[str] = []
+        details: list[dict[str, Any]] = []
+
+        for folder_name, document_folder in zip(unique_folders, resolved_folders):
+            logger.info("document_delete_start", extra={"folder": folder_name, "path": str(document_folder)})
+            metadata = metadata_by_folder.get(folder_name, {})
+            document_id = str((metadata or {}).get("document_id", "")).strip()
+            indexed_document_folder = str((metadata or {}).get("document_folder", "")).strip() or str(document_folder)
+            folder_result = _folder_cleanup_result(folder_name)
+
+            logger.info(
+                "document_delete_vector_cleanup_start",
+                extra={"folder": folder_name, "document_id": document_id, "document_folder": indexed_document_folder},
+            )
+            cleanup_result = document_delete.cleanup_document_vectors(
+                config,
+                document_folder=indexed_document_folder,
+                document_id=document_id,
+            )
+            folder_result["vector_cleanup"] = list(cleanup_result.get("details", []))
+            folder_result["supports_where_delete"] = bool(cleanup_result.get("supports_where_delete", False))
+            for collection_name in cleanup_result.get("collections_cleaned", []):
+                if collection_name not in collections_cleaned:
+                    collections_cleaned.append(collection_name)
+            logger.info(
+                "document_delete_vector_cleanup_complete",
+                extra={
+                    "folder": folder_name,
+                    "document_id": document_id,
+                    "collections_cleaned": cleanup_result.get("collections_cleaned", []),
+                    "details": cleanup_result.get("details", []),
+                },
+            )
+
+            try:
+                logger.info(
+                    "document_delete_index_remove_start",
+                    extra={"folder": folder_name, "index_path": str(index_path)},
+                )
+                delete_global_index_entry(index_path, document_folder)
+                folder_result["global_index_removed"] = True
+                global_index_removed.append(folder_name)
+                logger.info("document_delete_index_removed", extra={"folder": folder_name, "index_path": str(index_path)})
+            except Exception:
+                logger.exception(
+                    "document_delete_index_failed",
+                    extra={"folder": folder_name, "index_path": str(index_path)},
+                )
+                raise
+
+            try:
+                logger.info("document_delete_files_remove_start", extra={"folder": folder_name, "path": str(document_folder)})
+                shutil.rmtree(document_folder)
+                folder_result["filesystem_removed"] = True
+                logger.info("document_delete_files_removed", extra={"folder": folder_name, "path": str(document_folder)})
+            except Exception:
+                logger.exception(
+                    "document_delete_files_failed",
+                    extra={"folder": folder_name, "path": str(document_folder)},
+                )
+                raise
+
+            details.append(folder_result)
+
+        result = {
+            "deleted": True,
+            "folders": unique_folders,
+            "collections_cleaned": collections_cleaned,
+            "global_index_removed": global_index_removed,
+            "details": details,
+        }
+        _log_workflow_exit(start_ts, "documents", "delete_documents", delete_run_id, "ok")
+        return result
+    except Exception:
+        _log_workflow_exit(start_ts, "documents", "delete_documents", delete_run_id, "error")
+        raise
 
 
 def inspect_same_name_document(config_path: str | Path, file_name: str) -> dict[str, Any] | None:

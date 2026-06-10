@@ -62,6 +62,54 @@ def _exit_to_routing() -> None:
     reset_chat()
 
 
+def _clear_deleted_documents_from_session(deleted_folders: list[str]) -> None:
+    deleted_set = {Path(str(folder)).name for folder in deleted_folders if str(folder)}
+    if not deleted_set:
+        return
+
+    selected_before = list(st.session_state.get("selected_document_folders", []))
+    remaining_selected = [
+        folder for folder in selected_before
+        if Path(str(folder)).name not in deleted_set
+    ]
+    st.session_state["selected_document_folders"] = remaining_selected
+    selected_changed = len(remaining_selected) != len(selected_before)
+
+    for folder in deleted_set:
+        st.session_state.pop(f"doc_chk_{folder}", None)
+
+    active_doc = str(st.session_state.get("_sum_pane_active_doc", "") or "")
+    if Path(active_doc).name in deleted_set:
+        _set_sum_active()
+
+    active_deep_search = [
+        folder for folder in st.session_state.get("active_deep_search_folders", [])
+        if Path(str(folder)).name not in deleted_set
+    ]
+    deep_search_changed = len(active_deep_search) != len(st.session_state.get("active_deep_search_folders", []))
+    st.session_state["active_deep_search_folders"] = active_deep_search
+    if st.session_state.get("chat_mode") == "deep_search" and (deep_search_changed or not active_deep_search):
+        _exit_to_routing()
+
+    remaining_candidates = [
+        candidate for candidate in st.session_state.get("routing_candidates", [])
+        if Path(str(candidate.get("folder", ""))).name not in deleted_set
+    ]
+    candidates_changed = len(remaining_candidates) != len(st.session_state.get("routing_candidates", []))
+    st.session_state["routing_candidates"] = remaining_candidates
+    if candidates_changed and not remaining_candidates:
+        st.session_state["pending_routing_question"] = ""
+
+    active_summarization = {
+        folder for folder in st.session_state.get("active_summarization_folders", set())
+        if Path(str(folder)).name not in deleted_set
+    }
+    st.session_state["active_summarization_folders"] = active_summarization
+
+    if selected_changed or candidates_changed:
+        reset_chat()
+
+
 def _track_summarization(folder: str) -> None:
     """Start background summarization and register in the session-level tracking set."""
     pipeline.start_summarization_background(CONFIG_PATH, folder)
@@ -264,12 +312,14 @@ def render_existing_documents() -> None:
     # ── Select All / Deselect All ────────────────────────────────────────────
     col_a, col_b = st.columns(2)
     with col_a:
+        _marker("doc-select-actions-marker")
         if st.button("Select All", use_container_width=True):
             for doc in documents:
                 if doc["ready_to_chat"]:
                     st.session_state[f"doc_chk_{doc['folder_name']}"] = True
             st.rerun()
     with col_b:
+        _marker("doc-select-actions-marker")
         if st.button("Deselect All", use_container_width=True):
             for doc in documents:
                 st.session_state[f"doc_chk_{doc['folder_name']}"] = False
@@ -328,6 +378,48 @@ def render_existing_documents() -> None:
 
     if selected:
         st.caption(f"{len(selected)} document(s) selected")
+    delete_disabled = not selected
+    delete_col = st.columns(1)[0]
+    with delete_col:
+        _marker("delete-selected-marker")
+        if st.button("Delete Selected", use_container_width=True, disabled=delete_disabled, type="secondary"):
+            show_delete_documents_dialog(selected)
+
+
+@st.dialog("Delete Documents", width="large")
+def show_delete_documents_dialog(selected_folders: list[str]) -> None:
+    selected_folders = [str(folder) for folder in selected_folders if str(folder)]
+    if not selected_folders:
+        st.warning("Select at least one document to delete.")
+        return
+    folder_names = [Path(folder).name for folder in selected_folders]
+
+    doc_labels: list[str] = []
+    for folder in selected_folders:
+        try:
+            metadata = pipeline.load_document(folder)
+        except Exception:
+            metadata = {}
+        doc_name = str(metadata.get("document_name", Path(folder).name) or Path(folder).name)
+        doc_labels.append(f"`{doc_name}` (`{Path(folder).name}`)")
+
+    st.warning("This action permanently deletes the selected documents and their indexed data.")
+    st.markdown("\n".join(f"- {label}" for label in doc_labels))
+
+    col_cancel, col_delete = st.columns(2)
+    with col_cancel:
+        st.button("Cancel", use_container_width=True)
+    with col_delete:
+        if st.button("Delete Now", type="primary", use_container_width=True):
+            try:
+                result = pipeline.delete_documents(CONFIG_PATH, folder_names)
+            except Exception as exc:
+                st.error(str(exc))
+                return
+
+            _clear_deleted_documents_from_session(result.get("folders", []))
+            st.toast(f"Deleted {len(result.get('folders', []))} document(s).")
+            st.rerun()
 
 
 # ── Sidebar: document ingest ─────────────────────────────────────────────────
