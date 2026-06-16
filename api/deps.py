@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from fastapi import HTTPException
+from fastapi import Depends, HTTPException, Request
 import threading
 
 from core.config import load_app_config
@@ -40,8 +41,34 @@ def get_artifacts_root() -> str:
     return str(Path(config["paths"]["artifacts_root"]))
 
 
-def resolve_document_folder(folder: str) -> Path:
-    root = Path(get_artifacts_root()).resolve()
+@dataclass(frozen=True)
+class UserContext:
+    user_id: str
+    email: str
+    user_key: str
+
+
+def get_current_user(request: Request) -> UserContext:
+    user_id = str(getattr(request.state, "user_id", ""))
+    user_key = str(getattr(request.state, "user_key", ""))
+    email = str(getattr(request.state, "user_email", ""))
+    if not user_id or not user_key:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return UserContext(user_id=user_id, email=email, user_key=user_key)
+
+
+def get_user_artifacts_root(user: UserContext = Depends(get_current_user)) -> str:
+    root = Path(get_artifacts_root()) / user.user_key
+    root.mkdir(parents=True, exist_ok=True)
+    return str(root)
+
+
+def get_user_key(user: UserContext = Depends(get_current_user)) -> str:
+    return user.user_key
+
+
+def resolve_document_folder(folder: str, artifacts_root: str | None = None) -> Path:
+    root = Path(artifacts_root or get_artifacts_root()).resolve()
     resolved = (root / folder).resolve()
     try:
         resolved.relative_to(root)
@@ -50,8 +77,8 @@ def resolve_document_folder(folder: str) -> Path:
     return resolved
 
 
-def require_existing_document_folder(folder: str) -> Path:
-    resolved = resolve_document_folder(folder)
+def require_existing_document_folder(folder: str, artifacts_root: str | None = None) -> Path:
+    resolved = resolve_document_folder(folder, artifacts_root)
     if not resolved.exists() or not resolved.is_dir():
         raise HTTPException(status_code=404, detail=f"Document folder not found: {folder}")
     return resolved

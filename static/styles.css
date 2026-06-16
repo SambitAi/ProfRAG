@@ -30,6 +30,50 @@
     font-family: 'Inter','Segoe UI',system-ui,sans-serif;
 }
 
+/* Fixed session toolbar inside the navbar band */
+[data-testid="stHorizontalBlock"]:has(#session-toolbar-marker) {
+    position: fixed !important;
+    top: 8px !important;
+    right: 16px !important;
+    z-index: 1000000 !important;
+    width: min(460px, calc(100vw - 180px)) !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    gap: 10px !important;
+    align-items: center !important;
+    background: transparent !important;
+}
+[data-testid="stHorizontalBlock"]:has(#session-toolbar-marker) [data-testid="stColumn"] {
+    padding: 0 !important;
+}
+[data-testid="stHorizontalBlock"]:has(#session-toolbar-marker) > [data-testid="stColumn"]:first-child {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+}
+[data-testid="stHorizontalBlock"]:has(#session-toolbar-marker) > [data-testid="stColumn"]:last-child {
+    flex: 0 0 92px !important;
+    width: 92px !important;
+}
+[data-testid="stHorizontalBlock"]:has(#session-toolbar-marker) [data-testid="stCaptionContainer"] p,
+[data-testid="stHorizontalBlock"]:has(#session-toolbar-marker) [data-testid="stCaptionContainer"] span {
+    color: var(--c-text2) !important;
+    text-align: right !important;
+    margin: 0 !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+}
+[data-testid="stHorizontalBlock"]:has(#session-toolbar-marker) [data-testid="stBaseButton-secondary"] {
+    min-height: 34px !important;
+    width: 92px !important;
+    border: 1px solid var(--c-border) !important;
+    border-radius: 10px !important;
+    background: #FFFFFF !important;
+    color: var(--c-text1) !important;
+    box-shadow: none !important;
+    white-space: nowrap !important;
+}
+
 /* Page lock */
 html, body, .stApp { overflow: hidden !important; height: 100% !important; }
 section[data-testid="stMain"] { background: var(--c-bg-page) !important; overflow: hidden !important; padding-bottom: 0 !important; margin-bottom: 0 !important; }
@@ -41,6 +85,98 @@ section[data-testid="stMain"] > div { padding-bottom: 0 !important; margin-botto
 }
 [data-testid="stMainBlockContainer"] > div,
 [data-testid="stMainBlockContainer"] > div > div { margin-top: 0 !important; padding-top: 0 !important; }
+
+/* Auth page */
+[data-testid="stColumn"]:has(#auth-page-marker) {
+    padding-top: 0.5rem !important;
+}
+[data-testid="stHorizontalBlock"]:has(#auth-page-marker),
+[data-testid="stColumn"]:has(#auth-page-marker) {
+    background: #FFFFFF !important;
+}
+[data-testid="stMainBlockContainer"]:has(#auth-page-marker),
+[data-testid="stMainBlockContainer"]:has(#auth-page-marker) > div,
+[data-testid="stMainBlockContainer"]:has(#auth-page-marker) > div > div {
+    background: #FFFFFF !important;
+}
+[data-testid="stMain"]:has(#auth-page-marker),
+[data-testid="stMain"]:has(#auth-page-marker) > div,
+[data-testid="stMain"]:has(#auth-page-marker) section {
+    background: #FFFFFF !important;
+}
+[data-testid="stColumn"]:has(#auth-page-marker) .auth-top-spacer {
+    height: 1rem;
+}
+[data-testid="stColumn"]:has(#auth-page-marker) h3,
+[data-testid="stColumn"]:has(#auth-page-marker) p,
+[data-testid="stColumn"]:has(#auth-page-marker) span,
+[data-testid="stColumn"]:has(#auth-page-marker) label {
+    color: var(--c-text1) !important;
+}
+[data-testid="stColumn"]:has(#auth-page-marker) [data-testid="stVerticalBlockBorderWrapper"] {
+    background: #FFFFFF !important;
+    border: 1px solid #000000 !important;
+    border-radius: 16px !important;
+    box-shadow: none !important;
+}
+[data-testid="stColumn"]:has(#auth-page-marker) [data-testid="stForm"] {
+    background: transparent !important;
+    border: none !important;
+}
+[data-testid="stColumn"]:has(#auth-page-marker) [data-testid="stTextInputRootElement"] input,
+[data-testid="stColumn"]:has(#auth-page-marker) [data-baseweb="select"] > div {
+    background: #FFFFFF !important;
+    border: 1px solid #000000 !important;
+    border-radius: 12px !important;
+    color: #000000 !important;
+    box-shadow: none !important;
+}
+[data-testid="stColumn"]:has(#auth-page-marker) [data-testid="stTextInputRootElement"] input:focus,
+[data-testid="stColumn"]:has(#auth-page-marker) [data-baseweb="select"] > div:focus-within {
+    border-color: #000000 !important;
+    box-shadow: 0 0 0 1px #000000 !important;
+}
+[data-testid="stColumn"]:has(#auth-page-marker) [data-testid="stTextInputRootElement"] input::placeholder {
+    color: #666666 !important;
+}
+[data-testid="stColumn"]:has(#auth-page-marker) [data-testid="stFormSubmitButton"] button,
+[data-testid="stColumn"]:has(#auth-page-marker) [data-testid="stBaseButton-primary"],
+[data-testid="stColumn"]:has(#auth-page-marker) button[kind="primary"] {
+    border-radius: 12px !important;
+    border: 1px solid #000000 !important;
+    background: #FFFFFF !important;
+    color: #000000 !important;
+    box-shadow: none !important;
+}
+[data-testid="stColumn"]:has(#auth-page-marker) [data-testid="stFormSubmitButton"] button p,
+[data-testid="stColumn"]:has(#auth-page-marker) [data-testid="stBaseButton-primary"] p,
+[data-testid="stColumn"]:has(#auth-page-marker) button[kind="primary"] p {
+    color: #000000 !important;
+}
+[data-testid="stColumn"]:has(#auth-page-marker) [data-testid="stFormSubmitButton"] button:hover,
+[data-testid="stColumn"]:has(#auth-page-marker) [data-testid="stBaseButton-primary"]:hover,
+[data-testid="stColumn"]:has(#auth-page-marker) button[kind="primary"]:hover {
+    background: #F3F4F6 !important;
+    color: #000000 !important;
+    border-color: #000000 !important;
+}
+[data-testid="stColumn"]:has(#auth-page-marker) [data-testid="stFormSubmitButton"] button:hover p,
+[data-testid="stColumn"]:has(#auth-page-marker) [data-testid="stBaseButton-primary"]:hover p,
+[data-testid="stColumn"]:has(#auth-page-marker) button[kind="primary"]:hover p {
+    color: #000000 !important;
+}
+[data-testid="stColumn"]:has(#auth-page-marker) [data-testid="stBaseButton-secondary"] {
+    background: #FFFFFF !important;
+    border: 1px solid #000000 !important;
+    border-radius: 12px !important;
+    color: #000000 !important;
+    box-shadow: none !important;
+}
+[data-testid="stColumn"]:has(#auth-page-marker) [data-testid="stBaseButton-secondary"]:hover {
+    background: #F3F4F6 !important;
+    color: #000000 !important;
+    border-color: #000000 !important;
+}
 /* #chat-col-marker is always present — reliably targets the main 3-column block */
 [data-testid="stHorizontalBlock"]:has(#chat-col-marker),
 [data-testid="stHorizontalBlock"]:has(#doc-col-marker),
@@ -325,13 +461,23 @@ section[data-testid="stMain"] > div { padding-bottom: 0 !important; margin-botto
 }
 [data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stTextInputRootElement"] label { display: none !important; }
 [data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stFormSubmitButton"] button {
-    background: var(--c-accent) !important; color: #fff !important;
+    background: #FFFFFF !important; color: #000000 !important;
     border-radius: 10px !important; min-height: 38px !important; max-height: 38px !important;
-    padding: 0 20px !important; border: none !important;
+    padding: 0 20px !important; border: 1px solid #000000 !important;
     font-size: 0.9rem !important; font-weight: 600 !important;
     box-shadow: none !important; transition: background 0.12s !important; white-space: nowrap !important;
 }
-[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stFormSubmitButton"] button:hover { background: #3B55D4 !important; }
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stFormSubmitButton"] button p {
+    color: #000000 !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stFormSubmitButton"] button:hover {
+    background: #F3F4F6 !important;
+    color: #000000 !important;
+    border-color: #000000 !important;
+}
+[data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stFormSubmitButton"] button:hover p {
+    color: #000000 !important;
+}
 [data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stForm"] [data-testid="stVerticalBlock"] {
     display: flex !important; flex-direction: row !important;
     align-items: center !important; gap: 6px !important;
@@ -344,4 +490,19 @@ section[data-testid="stMain"] > div { padding-bottom: 0 !important; margin-botto
 }
 [data-testid="stHorizontalBlock"]:has(#action-bar-marker) [data-testid="stFormSubmitButton"] button {
     width: auto !important;
+}
+
+.inline-image-card {
+    border: 1px solid var(--c-border);
+    border-radius: 12px;
+    background: #FFFFFF;
+    padding: 0.4rem;
+    overflow: hidden;
+}
+
+.inline-image-preview {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 8px;
 }
