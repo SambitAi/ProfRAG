@@ -5,10 +5,15 @@ from pathlib import Path
 import threading
 import time
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
 import workflows
-from api.deps import get_artifacts_root, get_config_path, require_existing_document_folder
+from api.deps import (
+    get_config_path,
+    get_user_artifacts_root,
+    get_user_key,
+    require_existing_document_folder,
+)
 from api.schemas.documents import (
     DeleteDocumentsRequest,
     DeleteDocumentsResponse,
@@ -24,8 +29,7 @@ from core.job_store import create_job, find_job_by_idempotency_key, update_job
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 
-def _run_job(job_id: str, fn, *args) -> None:
-    artifacts_root = get_artifacts_root()
+def _run_job(job_id: str, artifacts_root: str, fn, *args) -> None:
     try:
         update_job(artifacts_root, job_id, state="running")
         result = fn(*args)
@@ -40,8 +44,7 @@ def _run_job(job_id: str, fn, *args) -> None:
         )
 
 
-def _run_summary_job(job_id: str, document_folder: str, starter_fn, *starter_args) -> None:
-    artifacts_root = get_artifacts_root()
+def _run_summary_job(job_id: str, artifacts_root: str, document_folder: str, starter_fn, *starter_args) -> None:
     timeout_seconds = 60 * 60
     deadline = time.time() + timeout_seconds
     try:
@@ -50,7 +53,7 @@ def _run_summary_job(job_id: str, document_folder: str, starter_fn, *starter_arg
 
         # Wait until summary pipeline reaches terminal state.
         while True:
-            metadata = workflows.load_document(document_folder)
+            metadata = workflows.load_document(document_folder, artifacts_root)
             status = str(metadata.get("summary_status", "pending"))
             if status == "ready" or bool(metadata.get("summary_ready", False)):
                 update_job(
@@ -92,9 +95,9 @@ def _run_summary_job(job_id: str, document_folder: str, starter_fn, *starter_arg
         )
 
 
-def _delete_documents_or_raise(folders: list[str]) -> DeleteDocumentsResponse:
+def _delete_documents_or_raise(folders: list[str], artifacts_root: str, user_key: str = "") -> DeleteDocumentsResponse:
     try:
-        result = workflows.delete_documents(get_config_path(), folders)
+        result = workflows.delete_documents(get_config_path(), folders, artifacts_root, user_key=user_key)
     except workflows.DocumentDeletionConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except workflows.DocumentDeletionNotFoundError as exc:
@@ -105,22 +108,27 @@ def _delete_documents_or_raise(folders: list[str]) -> DeleteDocumentsResponse:
 
 
 @router.get("")
-def list_documents() -> list[dict]:
-    return workflows.list_documents(get_config_path())
+def list_documents(artifacts_root: str = Depends(get_user_artifacts_root)) -> list[dict]:
+    return workflows.list_documents(get_config_path(), artifacts_root)
 
 
 # IMPORTANT: keep static routes above parameterized routes to avoid path capture.
 # `/documents/inspect`, `/documents/upload`, `/documents/ingest-url`, and `/documents/delete`
 # must be registered before `/documents/{folder}`.
 @router.get("/inspect", response_model=DocumentInspectResponse)
-def inspect_document(file_name: str = Query(..., min_length=1)) -> DocumentInspectResponse:
-    metadata = workflows.inspect_same_name_document(get_config_path(), file_name)
+def inspect_document(
+    file_name: str = Query(..., min_length=1),
+    artifacts_root: str = Depends(get_user_artifacts_root),
+) -> DocumentInspectResponse:
+    metadata = workflows.inspect_same_name_document(get_config_path(), file_name, artifacts_root)
     return DocumentInspectResponse(exists=metadata is not None, metadata=metadata)
 
 
 @router.post("/upload")
 def upload_document(
     req: UploadDocumentRequest,
+    artifacts_root: str = Depends(get_user_artifacts_root),
+    user_key: str = Depends(get_user_key),
     x_idempotency_key: str | None = Header(default=None),
     x_correlation_id: str | None = Header(default=None),
 ) -> dict:
@@ -129,7 +137,6 @@ def upload_document(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid base64 file_content_b64")
 
-    artifacts_root = get_artifacts_root()
     existing = find_job_by_idempotency_key(artifacts_root, "documents.upload", x_idempotency_key or "")
     if existing:
         return {"job_id": existing["job_id"], "state": existing["state"]}
@@ -141,7 +148,7 @@ def upload_document(
     )
     threading.Thread(
         target=_run_job,
-        args=(job["job_id"], workflows.prepare_document, get_config_path(), req.file_name, file_bytes, req.user_choice),
+        args=(job["job_id"], artifacts_root, workflows.prepare_document, get_config_path(), req.file_name, file_bytes, req.user_choice, artifacts_root, user_key),
         daemon=True,
     ).start()
     return {"job_id": job["job_id"], "state": job["state"]}
@@ -150,10 +157,11 @@ def upload_document(
 @router.post("/ingest-url")
 def ingest_url(
     req: IngestUrlRequest,
+    artifacts_root: str = Depends(get_user_artifacts_root),
+    user_key: str = Depends(get_user_key),
     x_idempotency_key: str | None = Header(default=None),
     x_correlation_id: str | None = Header(default=None),
 ) -> dict:
-    artifacts_root = get_artifacts_root()
     existing = find_job_by_idempotency_key(artifacts_root, "documents.ingest_url", x_idempotency_key or "")
     if existing:
         return {"job_id": existing["job_id"], "state": existing["state"]}
@@ -165,28 +173,38 @@ def ingest_url(
     )
     threading.Thread(
         target=_run_job,
-        args=(job["job_id"], workflows.prepare_url_document, get_config_path(), str(req.url), req.user_choice),
+        args=(job["job_id"], artifacts_root, workflows.prepare_url_document, get_config_path(), str(req.url), req.user_choice, artifacts_root, user_key),
         daemon=True,
     ).start()
     return {"job_id": job["job_id"], "state": job["state"]}
 
 
 @router.post("/delete", response_model=DeleteDocumentsResponse)
-def delete_documents(req: DeleteDocumentsRequest) -> DeleteDocumentsResponse:
-    return _delete_documents_or_raise(req.folders)
+def delete_documents(
+    req: DeleteDocumentsRequest,
+    artifacts_root: str = Depends(get_user_artifacts_root),
+    user_key: str = Depends(get_user_key),
+) -> DeleteDocumentsResponse:
+    return _delete_documents_or_raise(req.folders, artifacts_root, user_key)
 
 
 @router.get("/{folder}")
-def get_document(folder: str) -> dict:
-    document_folder = require_existing_document_folder(folder)
-    metadata = workflows.load_document(document_folder)
+def get_document(
+    folder: str,
+    artifacts_root: str = Depends(get_user_artifacts_root),
+) -> dict:
+    document_folder = require_existing_document_folder(folder, artifacts_root)
+    metadata = workflows.load_document(document_folder, artifacts_root)
     return metadata
 
 
 @router.get("/{folder}/status", response_model=DocumentStatusResponse)
-def get_document_status(folder: str) -> DocumentStatusResponse:
-    document_folder = require_existing_document_folder(folder)
-    metadata = workflows.load_document(document_folder)
+def get_document_status(
+    folder: str,
+    artifacts_root: str = Depends(get_user_artifacts_root),
+) -> DocumentStatusResponse:
+    document_folder = require_existing_document_folder(folder, artifacts_root)
+    metadata = workflows.load_document(document_folder, artifacts_root)
 
     return DocumentStatusResponse(
         folder_name=folder,
@@ -200,9 +218,12 @@ def get_document_status(folder: str) -> DocumentStatusResponse:
 
 
 @router.get("/{folder}/summaries/status")
-def get_summaries_status(folder: str) -> dict:
-    document_folder = require_existing_document_folder(folder)
-    metadata = workflows.load_document(document_folder)
+def get_summaries_status(
+    folder: str,
+    artifacts_root: str = Depends(get_user_artifacts_root),
+) -> dict:
+    document_folder = require_existing_document_folder(folder, artifacts_root)
+    metadata = workflows.load_document(document_folder, artifacts_root)
 
     return {
         "folder_name": folder,
@@ -214,9 +235,12 @@ def get_summaries_status(folder: str) -> dict:
 
 
 @router.get("/{folder}/summaries")
-def get_summaries(folder: str) -> dict:
-    document_folder = require_existing_document_folder(folder)
-    metadata = workflows.load_document(document_folder)
+def get_summaries(
+    folder: str,
+    artifacts_root: str = Depends(get_user_artifacts_root),
+) -> dict:
+    document_folder = require_existing_document_folder(folder, artifacts_root)
+    metadata = workflows.load_document(document_folder, artifacts_root)
     summaries_dir = Path(document_folder) / "summaries"
     level1 = (summaries_dir / "level1_onepager.json")
     level2 = (summaries_dir / "level2_medium.json")
@@ -234,10 +258,14 @@ def get_summaries(folder: str) -> dict:
 
 
 @router.get("/{folder}/summaries/{level}")
-def get_summary_level(folder: str, level: str) -> dict:
+def get_summary_level(
+    folder: str,
+    level: str,
+    artifacts_root: str = Depends(get_user_artifacts_root),
+) -> dict:
     if level not in {"level1", "level2", "level3"}:
         raise HTTPException(status_code=400, detail="Invalid summary level")
-    document_folder = require_existing_document_folder(folder)
+    document_folder = require_existing_document_folder(folder, artifacts_root)
     summaries_dir = Path(document_folder) / "summaries"
     file_map = {
         "level1": summaries_dir / "level1_onepager.json",
@@ -254,11 +282,12 @@ def get_summary_level(folder: str, level: str) -> dict:
 @router.post("/{folder}/summaries/start")
 def start_summaries(
     folder: str,
+    artifacts_root: str = Depends(get_user_artifacts_root),
+    user_key: str = Depends(get_user_key),
     x_idempotency_key: str | None = Header(default=None),
     x_correlation_id: str | None = Header(default=None),
 ) -> dict:
-    document_folder = require_existing_document_folder(folder)
-    artifacts_root = get_artifacts_root()
+    document_folder = require_existing_document_folder(folder, artifacts_root)
     existing = find_job_by_idempotency_key(artifacts_root, "summaries.start", x_idempotency_key or "")
     if existing:
         return {"job_id": existing["job_id"], "state": existing["state"]}
@@ -270,7 +299,7 @@ def start_summaries(
     )
     threading.Thread(
         target=_run_summary_job,
-        args=(job["job_id"], str(document_folder), workflows.start_summarization_background, get_config_path(), str(document_folder)),
+        args=(job["job_id"], artifacts_root, str(document_folder), workflows.start_summarization_background, get_config_path(), str(document_folder), artifacts_root, user_key),
         daemon=True,
     ).start()
     return {"job_id": job["job_id"], "state": job["state"]}
@@ -280,11 +309,12 @@ def start_summaries(
 def reset_summaries(
     folder: str,
     req: SummaryResetRequest,
+    artifacts_root: str = Depends(get_user_artifacts_root),
+    user_key: str = Depends(get_user_key),
     x_idempotency_key: str | None = Header(default=None),
     x_correlation_id: str | None = Header(default=None),
 ) -> dict:
-    document_folder = require_existing_document_folder(folder)
-    artifacts_root = get_artifacts_root()
+    document_folder = require_existing_document_folder(folder, artifacts_root)
     existing = find_job_by_idempotency_key(artifacts_root, "summaries.reset", x_idempotency_key or "")
     if existing:
         return {"job_id": existing["job_id"], "state": existing["state"]}
@@ -298,11 +328,14 @@ def reset_summaries(
         target=_run_summary_job,
         args=(
             job["job_id"],
+            artifacts_root,
             str(document_folder),
             workflows.reset_summary_level,
             get_config_path(),
             str(document_folder),
             req.level,
+            artifacts_root,
+            user_key,
         ),
         daemon=True,
     ).start()
@@ -310,5 +343,9 @@ def reset_summaries(
 
 
 @router.delete("/{folder}", response_model=DeleteDocumentsResponse)
-def delete_document(folder: str) -> DeleteDocumentsResponse:
-    return _delete_documents_or_raise([folder])
+def delete_document(
+    folder: str,
+    artifacts_root: str = Depends(get_user_artifacts_root),
+    user_key: str = Depends(get_user_key),
+) -> DeleteDocumentsResponse:
+    return _delete_documents_or_raise([folder], artifacts_root, user_key)

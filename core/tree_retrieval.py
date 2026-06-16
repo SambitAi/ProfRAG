@@ -127,6 +127,23 @@ def retrieve_tree(
     selected_document_folders: list[str] | None = None,
 ) -> dict[str, Any]:
     selected_document_folders = selected_document_folders or []
+    # Tenancy boundary: every selected folder must live under the configured
+    # artifacts root (the per-user root when the config was patched upstream).
+    # This guards the metadata-rehydration path below against forged or stale
+    # absolute paths pointing into another user's subtree.
+    if selected_document_folders:
+        allowed_root = Path(config["paths"]["artifacts_root"]).resolve()
+        contained: list[str] = []
+        for raw_folder in selected_document_folders:
+            resolved = Path(raw_folder).resolve()
+            try:
+                resolved.relative_to(allowed_root)
+            except ValueError:
+                raise ValueError(
+                    f"Selected document folder is outside the configured artifacts root: {raw_folder}"
+                )
+            contained.append(str(resolved))
+        selected_document_folders = contained
     mode = classify_query(question)
 
     global_index = load_global_index(
@@ -135,13 +152,14 @@ def retrieve_tree(
     )
     docs_map = (global_index or {}).get("documents", {}) or {}
     if selected_document_folders:
-        allowed = {Path(f).name for f in selected_document_folders}
+        # Preserve the caller-supplied absolute paths; do NOT reconstruct from config root.
+        folder_by_name = {Path(f).name: str(f) for f in selected_document_folders}
+        allowed = set(folder_by_name.keys())
         scoped_docs = {k: v for k, v in docs_map.items() if k in allowed}
-        artifacts_root = Path(config["paths"]["artifacts_root"])
-        for folder_name in allowed:
+        for folder_name, folder_abs in folder_by_name.items():
             if folder_name in scoped_docs:
                 continue
-            folder_path = artifacts_root / folder_name
+            folder_path = Path(folder_abs)
             metadata_path = folder_path / "metadata.json"
             if not metadata_path.exists():
                 continue

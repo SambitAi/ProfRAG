@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import mimetypes
 from pathlib import Path
 from typing import Any
 import re
@@ -7,10 +9,180 @@ import re
 import streamlit as st
 
 import main as pipeline
+from api.security import decoy_question_for
+from core import user_store
+from core.config import load_app_config
 
 
 CONFIG_PATH = Path(__file__).parent / "config" / "app_config.yaml"
 _CITE_TOKEN_RE = re.compile(r"\[Source:\s*([^\]]+)\]")
+
+
+# ── Auth ─────────────────────────────────────────────────────────────────────
+
+def _base_artifacts_root() -> str:
+    config = load_app_config(CONFIG_PATH)
+    return str(Path(config["paths"]["artifacts_root"]))
+
+
+def _user_root() -> str:
+    return str(st.session_state.get("auth_artifacts_root", ""))
+
+
+def _user_key() -> str:
+    return str(st.session_state.get("auth_user_key", ""))
+
+
+def _login_user(email: str, password: str) -> bool:
+    try:
+        record = user_store.verify_user(_base_artifacts_root(), email, password)
+    except user_store.UserStoreError:
+        record = None
+    if record is None:
+        return False
+    user_root = Path(_base_artifacts_root()) / record.user_key
+    user_root.mkdir(parents=True, exist_ok=True)
+    st.session_state["auth_email"] = record.email
+    st.session_state["auth_user_key"] = record.user_key
+    st.session_state["auth_artifacts_root"] = str(user_root)
+    return True
+
+
+def _logout() -> None:
+    # Clear everything so the next login starts from a clean slate — no messages,
+    # selections, or summary-pane state can leak between users.
+    st.session_state.clear()
+    st.rerun()
+
+
+def _switch_auth_view(view: str) -> None:
+    for key in (
+        "login_email",
+        "login_password",
+        "register_email",
+        "register_password",
+        "register_question",
+        "register_answer",
+        "reset_start_email",
+        "reset_answer",
+        "reset_new_password",
+    ):
+        st.session_state.pop(key, None)
+    st.session_state.pop("reset_email", None)
+    st.session_state.pop("reset_question", None)
+    st.session_state["auth_view"] = view
+    st.rerun()
+
+
+def _render_login_form() -> None:
+    st.subheader("Sign in")
+    flash = st.session_state.pop("auth_flash", "")
+    if flash:
+        st.success(flash)
+    with st.container(border=True):
+        with st.form("login_form", border=False):
+            email = st.text_input("Email", key="login_email", autocomplete="email")
+            password = st.text_input("Password", type="password", key="login_password", autocomplete="current-password")
+            submitted = st.form_submit_button("Sign in", type="primary", use_container_width=True)
+    if submitted:
+        if _login_user(email, password):
+            st.rerun()
+        st.error("Invalid email or password")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if st.button("Create account", use_container_width=True):
+            _switch_auth_view("register")
+    with col_b:
+        if st.button("Forgot password?", use_container_width=True):
+            _switch_auth_view("reset")
+
+
+def _render_register_form() -> None:
+    st.subheader("Create account")
+    with st.container(border=True):
+        with st.form("register_form", border=False):
+            email = st.text_input("Email", key="register_email", autocomplete="email")
+            password = st.text_input("Password", type="password", key="register_password", autocomplete="new-password")
+            st.caption(f"Password must be at least {user_store.MIN_PASSWORD_LENGTH} characters.")
+            question = st.selectbox("Security question", user_store.SECURITY_QUESTIONS, key="register_question")
+            answer = st.text_input("Security answer", key="register_answer", autocomplete="off")
+            submitted = st.form_submit_button("Create account", type="primary", use_container_width=True)
+    if submitted:
+        try:
+            user_store.create_user(_base_artifacts_root(), email, password, question, answer)
+        except user_store.UserValidationError as exc:
+            st.error(str(exc))
+        except user_store.UserStoreError:
+            st.error("Could not create account.")
+        else:
+            st.session_state["auth_flash"] = "Account created — please sign in."
+            _switch_auth_view("login")
+    if st.button("Back to sign in", use_container_width=True):
+        _switch_auth_view("login")
+
+
+def _render_reset_form() -> None:
+    st.subheader("Reset password")
+    base_root = _base_artifacts_root()
+    reset_email = str(st.session_state.get("reset_email", ""))
+
+    if not reset_email:
+        with st.container(border=True):
+            with st.form("reset_start_form", border=False):
+                email = st.text_input("Email", key="reset_start_email", autocomplete="email")
+                submitted = st.form_submit_button("Continue", type="primary", use_container_width=True)
+        if submitted and email.strip():
+            # Always show a question (real or decoy) — never reveal whether the email exists.
+            question = user_store.get_security_question(base_root, email) or decoy_question_for(email)
+            st.session_state["reset_email"] = email.strip()
+            st.session_state["reset_question"] = question
+            st.session_state.pop("reset_answer", None)
+            st.session_state.pop("reset_new_password", None)
+            st.rerun()
+    else:
+        with st.container(border=True):
+            st.caption(f"Account: {reset_email}")
+            st.markdown(f"**{st.session_state.get('reset_question', '')}**")
+            with st.form("reset_finish_form", border=False):
+                answer = st.text_input("Security answer", key="reset_answer", autocomplete="off")
+                new_password = st.text_input("New password", type="password", key="reset_new_password", autocomplete="new-password")
+                st.caption(f"Password must be at least {user_store.MIN_PASSWORD_LENGTH} characters.")
+                submitted = st.form_submit_button("Reset password", type="primary", use_container_width=True)
+        if submitted:
+            reset_ok = False
+            validation_error = ""
+            try:
+                if user_store.verify_security_answer(base_root, reset_email, answer):
+                    reset_ok = user_store.update_password(base_root, reset_email, new_password)
+            except user_store.UserValidationError as exc:
+                validation_error = str(exc)
+            except user_store.UserStoreError:
+                reset_ok = False
+            if reset_ok:
+                st.session_state["auth_flash"] = "Password reset — sign in with your new password."
+                _switch_auth_view("login")
+                return
+            if validation_error:
+                st.error(validation_error)
+            else:
+                st.error("Could not reset password.")
+
+    if st.button("Back to sign in", use_container_width=True):
+        _switch_auth_view("login")
+
+
+def render_auth() -> None:
+    _, center, _ = st.columns([1, 1.2, 1])
+    with center:
+        _marker("auth-page-marker")
+        st.markdown('<div class="auth-top-spacer"></div>', unsafe_allow_html=True)
+        view = st.session_state.get("auth_view", "login")
+        if view == "register":
+            _render_register_form()
+        elif view == "reset":
+            _render_reset_form()
+        else:
+            _render_login_form()
 
 
 # ── Session state ────────────────────────────────────────────────────────────
@@ -112,7 +284,7 @@ def _clear_deleted_documents_from_session(deleted_folders: list[str]) -> None:
 
 def _track_summarization(folder: str) -> None:
     """Start background summarization and register in the session-level tracking set."""
-    pipeline.start_summarization_background(CONFIG_PATH, folder)
+    pipeline.start_summarization_background(CONFIG_PATH, folder, _user_root(), _user_key())
     st.session_state["active_summarization_folders"].add(str(folder))
 
 
@@ -165,7 +337,7 @@ _LEVEL_LONG  = {"level1": "1-Pager Summary", "level2": "Medium Summary", "level3
 
 def _render_summary_doc_card(folder: str, active_doc: str, active_level: str) -> None:
     """Render one document's status + level-button row in the summary pane."""
-    metadata   = pipeline.load_document(folder)
+    metadata   = pipeline.load_document(folder, _user_root())
     doc_name   = metadata.get("document_name", Path(folder).name)
     status     = metadata.get("summary_status", "pending")
     sum_ready  = metadata.get("summary_ready", False)
@@ -268,7 +440,7 @@ def render_summary_pane(selected_folders: list[str]) -> None:
         except Exception:
             pass
 
-        doc_name = pipeline.load_document(active_doc).get("document_name", Path(active_doc).name)
+        doc_name = pipeline.load_document(active_doc, _user_root()).get("document_name", Path(active_doc).name)
         with st.expander(f"{_LEVEL_LONG[active_level]} — {doc_name}", expanded=True):
             if active_level == "level3":
                 for sec in data.get("sections", []):
@@ -280,7 +452,7 @@ def render_summary_pane(selected_folders: list[str]) -> None:
             if st.button("↻ Regenerate this level",
                          key=f"sp_regen_{Path(active_doc).name}_{active_level}",
                          use_container_width=True):
-                pipeline.reset_summary_level(CONFIG_PATH, active_doc, active_level)
+                pipeline.reset_summary_level(CONFIG_PATH, active_doc, active_level, _user_root(), _user_key())
                 st.session_state["active_summarization_folders"].add(str(active_doc))
                 _set_sum_active()
                 st.rerun()
@@ -304,7 +476,7 @@ _DOC_ICON_SVG = (
 
 
 def render_existing_documents() -> None:
-    documents = pipeline.list_documents(CONFIG_PATH)
+    documents = pipeline.list_documents(CONFIG_PATH, _user_root())
     if not documents:
         st.info("No persisted documents found yet.")
         return
@@ -397,7 +569,7 @@ def show_delete_documents_dialog(selected_folders: list[str]) -> None:
     doc_labels: list[str] = []
     for folder in selected_folders:
         try:
-            metadata = pipeline.load_document(folder)
+            metadata = pipeline.load_document(folder, _user_root())
         except Exception:
             metadata = {}
         doc_name = str(metadata.get("document_name", Path(folder).name) or Path(folder).name)
@@ -412,7 +584,7 @@ def show_delete_documents_dialog(selected_folders: list[str]) -> None:
     with col_delete:
         if st.button("Delete Now", type="primary", use_container_width=True):
             try:
-                result = pipeline.delete_documents(CONFIG_PATH, folder_names)
+                result = pipeline.delete_documents(CONFIG_PATH, folder_names, _user_root(), _user_key())
             except Exception as exc:
                 st.error(str(exc))
                 return
@@ -447,6 +619,8 @@ def render_upload_panel() -> None:
                     file_name=st.session_state["pending_pdf_name"],
                     file_bytes=st.session_state["pending_pdf_bytes"],
                     user_choice=st.session_state["pending_pdf_choice"],
+                    artifacts_root=_user_root(),
+                    user_key=_user_key(),
                 )
                 _post_ingest(metadata)
                 if not metadata.get("ready_to_chat"):
@@ -477,7 +651,7 @@ def render_upload_panel() -> None:
         return
 
     user_choice = "new_version"
-    same_name_document = pipeline.inspect_same_name_document(CONFIG_PATH, uploaded_file.name)
+    same_name_document = pipeline.inspect_same_name_document(CONFIG_PATH, uploaded_file.name, _user_root())
     if same_name_document and same_name_document.get("ready_to_chat"):
         user_choice = st.radio(
             "A stored file with the same name exists. Choose what to do.",
@@ -503,6 +677,8 @@ def render_upload_panel() -> None:
                     file_name=uploaded_file.name,
                     file_bytes=uploaded_file.getvalue(),
                     user_choice="reuse",
+                    artifacts_root=_user_root(),
+                    user_key=_user_key(),
                 )
             _post_ingest(metadata)
             st.rerun()
@@ -530,6 +706,8 @@ def render_url_panel() -> None:
                     CONFIG_PATH,
                     st.session_state["pending_url"],
                     st.session_state["pending_user_choice"],
+                    artifacts_root=_user_root(),
+                    user_key=_user_key(),
                 )
                 _post_ingest(metadata)
                 st.session_state["url_input_key"] += 1
@@ -556,7 +734,7 @@ def render_url_panel() -> None:
 
     user_choice = "new_version"
     if url.startswith(("http://", "https://")) and "." in url[8:]:
-        same = pipeline.inspect_same_name_document(CONFIG_PATH, pipeline.url_ingest.url_to_document_name(url))
+        same = pipeline.inspect_same_name_document(CONFIG_PATH, pipeline.url_ingest.url_to_document_name(url), _user_root())
         if same and same.get("ready_to_chat"):
             user_choice = st.radio(
                 "A stored document with the same URL already exists.",
@@ -585,7 +763,20 @@ def _render_images_expander(image_paths: list[str]) -> None:
     with st.expander(f"📷 {len(image_paths)} image(s)"):
         cols = st.columns(min(len(image_paths), 3))
         for i, img_path in enumerate(image_paths):
-            cols[i % 3].image(img_path, use_container_width=True)
+            img_file = Path(str(img_path))
+            if not img_file.exists():
+                cols[i % 3].caption(f"Missing image: {img_file.name}")
+                continue
+            mime_type = mimetypes.guess_type(str(img_file))[0] or "image/png"
+            data = base64.b64encode(img_file.read_bytes()).decode("ascii")
+            cols[i % 3].markdown(
+                (
+                    '<div class="inline-image-card">'
+                    f'<img src="data:{mime_type};base64,{data}" alt="{img_file.name}" class="inline-image-preview" />'
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
 
 
 def _render_sources_expander(sources: list[dict]) -> None:
@@ -644,7 +835,7 @@ def _render_message_history() -> None:
 
 
 def _watcher_status_snapshot() -> dict[str, Any]:
-    docs = pipeline.list_documents(CONFIG_PATH)
+    docs = pipeline.list_documents(CONFIG_PATH, _user_root())
     queued = sum(
         1 for d in docs
         if d.get("ready_to_chat") and d.get("summary_status", "pending") == "pending"
@@ -671,7 +862,7 @@ def _render_routing_candidates() -> None:
         label = f"**{cand['doc_name']}**{section_hint}  `relevance {score_pct}`"
         st.checkbox(label, key=key)
         with st.expander(f"Why this matched: {cand['doc_name']}", expanded=False):
-            meta = pipeline.load_document(cand["folder"])
+            meta = pipeline.load_document(cand["folder"], _user_root())
             card = (meta or {}).get("document_card", {}) or {}
             opening = (card.get("opening_text", "") or "").strip()
             l1_summary = (card.get("l1_summary", "") or "").strip()
@@ -737,7 +928,7 @@ def render_chat(question: str | None = None) -> None:
 
 
 def _render_single_doc_chat(document_folder: str, question: str | None = None) -> None:
-    metadata = pipeline.load_document(document_folder)
+    metadata = pipeline.load_document(document_folder, _user_root())
     st.subheader(f"Chatting with `{metadata['document_name']}`")
     st.caption(
         f"Folder: `{Path(document_folder).name}` | "
@@ -759,7 +950,7 @@ def _render_single_doc_chat(document_folder: str, question: str | None = None) -
 
     with st.chat_message("assistant"):
         with st.spinner("Retrieving context and generating answer..."):
-            answer_payload = pipeline.ask_question(CONFIG_PATH, document_folder, question)
+            answer_payload = pipeline.ask_question(CONFIG_PATH, document_folder, question, _user_root(), _user_key())
             sources = answer_payload.get("sources", [])
             image_paths = answer_payload.get("image_paths", [])
             if answer_payload.get("abstain"):
@@ -784,7 +975,7 @@ def _render_single_doc_chat(document_folder: str, question: str | None = None) -
 
 
 def _render_direct_multi_doc_chat(document_folders: list[str], question: str | None = None) -> None:
-    doc_names = [pipeline.load_document(f).get("document_name", Path(f).name) for f in document_folders]
+    doc_names = [pipeline.load_document(f, _user_root()).get("document_name", Path(f).name) for f in document_folders]
     st.subheader(f"Multi-doc mode — {len(document_folders)} documents")
     st.caption(", ".join(doc_names))
 
@@ -816,7 +1007,7 @@ def _render_routing_chat(question: str | None = None) -> None:
         st.markdown(question)
 
     with st.spinner("Searching document library..."):
-        candidates = pipeline.find_relevant_documents(CONFIG_PATH, question)
+        candidates = pipeline.find_relevant_documents(CONFIG_PATH, question, _user_root(), _user_key())
 
     if not candidates:
         msg = (
@@ -833,7 +1024,7 @@ def _render_routing_chat(question: str | None = None) -> None:
 
 
 def _render_deep_search_chat(active_folders: list[str], question: str | None = None) -> None:
-    doc_names = [pipeline.load_document(f).get("document_name", Path(f).name) for f in active_folders]
+    doc_names = [pipeline.load_document(f, _user_root()).get("document_name", Path(f).name) for f in active_folders]
 
     # Banner
     col_names, col_btn = st.columns([4, 1])
@@ -871,7 +1062,7 @@ def _process_multi_doc_question(question: str, document_folders: list[str]) -> N
 
     with st.chat_message("assistant"):
         with st.spinner("Searching across documents..."):
-            payload = pipeline.ask_multi_document_question(CONFIG_PATH, document_folders, question)
+            payload = pipeline.ask_multi_document_question(CONFIG_PATH, document_folders, question, _user_root(), _user_key())
 
         answer = payload.get("answer", "No answer generated.")
         sources = payload.get("sources", [])
@@ -965,7 +1156,7 @@ def _maybe_auto_refresh() -> None:
         return
     still_running = {
         f for f in active
-        if pipeline.load_document(f).get("summary_status") == "in_progress"
+        if pipeline.load_document(f, _user_root()).get("summary_status") == "in_progress"
     }
     st.session_state["active_summarization_folders"] = still_running
     if still_running:
@@ -977,8 +1168,24 @@ def main() -> None:
     st.set_page_config(page_title="ProfRAG", page_icon="📄", layout="wide")
     st.markdown(_APP_CSS, unsafe_allow_html=True)
     st.markdown(_NAVBAR_HTML, unsafe_allow_html=True)
+
+    # Auth gate: nothing below renders without a logged-in user.
+    if not st.session_state.get("auth_user_key"):
+        render_auth()
+        return
+
     initialize_state()
+    # Base-root watcher: the watcher itself scans every user subtree with a
+    # per-user patched config, so one process-wide start covers all users.
     pipeline.start_summary_watcher(CONFIG_PATH)
+
+    session_col, logout_col = st.columns([4, 1], vertical_alignment="center")
+    with session_col:
+        _marker("session-toolbar-marker")
+        st.caption(f"Signed in as `{st.session_state.get('auth_email', '')}`")
+    with logout_col:
+        if st.button("Logout", key="logout_btn", use_container_width=True):
+            _logout()
 
     pending_q = st.session_state.pop("_bar_question", None) or None
 

@@ -7,12 +7,15 @@ from fastapi.responses import JSONResponse
 
 from api.deps import get_artifacts_root, get_config_path
 from api.middleware import AuthMiddleware, RateLimitMiddleware, RequestLoggingMiddleware, RequestSizeLimitMiddleware
+from api.routers.auth import router as auth_router
 from api.routers.chat import router as chat_router
 from api.routers.documents import router as documents_router
 from api.routers.health import router as health_router
 from api.routers.jobs import router as jobs_router
 from api.routers.summaries import router as summaries_router
 from api.schemas.common import ErrorResponse
+from api.security import validate_jwt_secret
+from core.collections import iter_user_roots
 from core.job_store import recover_inflight_jobs
 
 
@@ -25,14 +28,21 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _startup_validate() -> None:
+        validate_jwt_secret()
         config_path = Path(get_config_path())
         if not config_path.exists():
             raise RuntimeError(f"Config file not found: {config_path}")
-        artifacts_root = Path(get_artifacts_root())
-        artifacts_root.mkdir(parents=True, exist_ok=True)
-        await asyncio.to_thread(recover_inflight_jobs, artifacts_root)
+        base_root = Path(get_artifacts_root())
+        base_root.mkdir(parents=True, exist_ok=True)
+        # Recover jobs in every user root that already exists on disk, plus the base root
+        # itself (backward-compat with single-tenant installs). iter_user_roots applies
+        # strict detection so infra dirs (chroma_db, jobs) and legacy document folders
+        # never get a junk jobs/ tree created under them.
+        roots_to_recover = [base_root, *iter_user_roots(base_root)]
+        await asyncio.gather(*[asyncio.to_thread(recover_inflight_jobs, r) for r in roots_to_recover])
 
     app.include_router(health_router, prefix="/v2")
+    app.include_router(auth_router, prefix="/v2")
     app.include_router(documents_router, prefix="/v2")
     app.include_router(summaries_router, prefix="/v2")
     app.include_router(chat_router, prefix="/v2")

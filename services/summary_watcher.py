@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from core.collections import iter_user_roots, patch_config_for_user
 from core.metadata import load_metadata
 from services import summarize_document
 
@@ -33,27 +34,41 @@ def _candidate_docs(artifacts_root: Path) -> list[Path]:
     return out
 
 
+def _scan_targets(config: dict[str, Any], artifacts_root: Path) -> list[tuple[Path, dict[str, Any]]]:
+    """Return (document_folder, config) pairs covering the given root AND any per-user
+    roots directly under it, so a single base-root watcher serves every user's pending
+    documents. User-root detection is strict (user_key naming format, infra dirs and
+    document folders excluded) — see core.collections.iter_user_roots."""
+    targets: list[tuple[Path, dict[str, Any]]] = [(f, config) for f in _candidate_docs(artifacts_root)]
+    for sub in iter_user_roots(artifacts_root):
+        user_config = {**config, "paths": {**config["paths"], "artifacts_root": str(sub)}}
+        user_config = patch_config_for_user(user_config, sub.name)
+        for folder in _candidate_docs(sub):
+            targets.append((folder, user_config))
+    return targets
+
+
 def _loop(config: dict[str, Any], stop_event: threading.Event) -> None:
     artifacts_root = Path(config["paths"]["artifacts_root"])
     interval = int(config.get("summary_watcher", {}).get("scan_interval_seconds", 60))
     max_workers = int(config.get("summary_watcher", {}).get("max_workers", 2))
     sem = threading.BoundedSemaphore(value=max_workers)
 
-    def _run_one(folder: Path) -> None:
+    def _run_one(folder: Path, folder_config: dict[str, Any]) -> None:
         if not sem.acquire(blocking=False):
             return
         try:
-            summarize_document.run(folder, config)
+            summarize_document.run(folder, folder_config)
         except Exception:
             logger.exception("Summary watcher failed for %s", folder)
         finally:
             sem.release()
 
     while not stop_event.is_set():
-        for folder in _candidate_docs(artifacts_root):
+        for folder, folder_config in _scan_targets(config, artifacts_root):
             if stop_event.is_set():
                 break
-            t = threading.Thread(target=_run_one, args=(folder,), daemon=True)
+            t = threading.Thread(target=_run_one, args=(folder, folder_config), daemon=True)
             t.start()
         stop_event.wait(interval)
 

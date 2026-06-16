@@ -135,3 +135,47 @@ AZURE_OPENAI_API_VERSION=2025-01-01-preview
   - `docs/v2/archive/multi_doc_retrieval_refactor_summary.md`
   - `docs/v2/archive/api_layer_refactor_summary.md`
 
+## v3 Multi-User Deployment
+
+### Auth & per-user storage
+
+- Users live in `artifacts/.users/users.db` (SQLite, WAL mode, argon2id password/answer hashes).
+- Each user owns `artifacts/<user_key>/` — documents, `metadata.json` global index, `jobs/`, `.locks/`, `chroma_db/`.
+- Chroma collections are per-user: `<base>__u__<user_key>` (resolved by `core/collections.py`).
+- API auth: HS256 JWT access tokens (1-hour expiry) with an in-memory revocation denylist.
+- `PROFRAG_JWT_SECRET` (min 32 chars) must be set in the environment before starting the API. Never put it in config files.
+
+### Migrating an existing single-tenant install
+
+```bash
+# Stop the API/UI first.
+python scripts/migrate_to_multiuser.py            # interactive
+python scripts/migrate_to_multiuser.py --email owner@example.com --password "..." --question-index 0 --answer "..."
+```
+
+Creates (or reuses) the owner account, moves all document folders, the global index, `jobs/`, and `chroma_db/` under `artifacts/<owner_key>/`, rewrites stored paths, and renames Chroma collections to the `__u__` format. Idempotent — safe to re-run.
+
+### Single-worker constraint
+
+The API **must run with exactly one worker process**:
+
+```bash
+uvicorn api.app:app --workers 1
+```
+
+Why:
+
+- The JWT revocation denylist (`api/security.py`) is in-process memory — a second worker would not see tokens revoked by the first, so logout and password-reset revocation would silently stop working. (Denylist loss on restart is accepted: tokens expire within an hour.)
+- The auth rate-limit counters (`api/routers/auth.py`) and the rate-limit middleware are in-process; multiple workers would multiply the effective limits.
+- The summary watcher (`services/summary_watcher.py`) is a process-wide singleton thread; multiple workers would run duplicate scans.
+- ChromaDB `PersistentClient` mode does not support concurrent access to one persist directory from multiple processes.
+
+Background work (ingest, summarization) runs on daemon threads inside the single worker. All thread spawn sites capture the user-scoped `artifacts_root` and `user_key` at spawn time — never resolved inside a thread after request scope ends.
+
+### Scale-out path
+
+1. **Chroma**: set `vector_db.host`/`port` to a shared Chroma server (`HttpClient` mode). Per-user isolation is already at the collection-name level, so nothing else changes.
+2. **Token revocation + rate limits**: move the denylist and counters from process memory to a shared store (Redis). Until then, `--workers 1`.
+3. **Summary watcher**: run as a separate single-instance process instead of one thread per worker.
+4. **Job store / locks**: file-based stores under `artifacts/<user_key>/` assume a single host; multi-host needs a shared queue (e.g. Redis).
+

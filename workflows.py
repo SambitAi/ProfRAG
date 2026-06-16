@@ -7,6 +7,7 @@ import threading
 from time import perf_counter
 from typing import Any
 
+from core.collections import patch_config_for_user
 from core.config import load_app_config
 from core.global_index import (
     build_global_entry,
@@ -51,6 +52,21 @@ class DocumentDeletionConflictError(DocumentDeletionError):
     """Raised when a target document cannot be deleted due to active work."""
 
 
+def _require_folder_in_root(document_folder: str | Path, artifacts_root: str | Path) -> str:
+    """Tenancy boundary: reject any document folder outside the caller's artifacts root.
+
+    Raises FileNotFoundError (-> 404 at the API edge) rather than a permission error
+    so a cross-user probe cannot distinguish "exists elsewhere" from "does not exist".
+    """
+    root = Path(artifacts_root).resolve()
+    resolved = Path(document_folder).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        raise FileNotFoundError(f"Document folder not found: {Path(document_folder).name}")
+    return str(resolved)
+
+
 def _folder_cleanup_result(folder_name: str) -> dict[str, Any]:
     return {
         "folder": folder_name,
@@ -82,8 +98,10 @@ def _log_workflow_exit(start_ts: float, workflow: str, stage: str, document_id: 
     )
 
 
-def list_documents(config_path: str | Path) -> list[dict[str, Any]]:
+def list_documents(config_path: str | Path, artifacts_root: str | None = None) -> list[dict[str, Any]]:
     config = load_app_config(config_path)
+    if artifacts_root:
+        config = {**config, "paths": {**config["paths"], "artifacts_root": str(artifacts_root)}}
     artifacts_root = config["paths"]["artifacts_root"]
     artifacts_root_path = Path(artifacts_root)
     documents: list[dict[str, Any]] = []
@@ -200,11 +218,14 @@ def _assert_no_active_folder_jobs(
             )
 
 
-def delete_documents(config_path: str | Path, folders: list[str]) -> dict[str, Any]:
+def delete_documents(config_path: str | Path, folders: list[str], artifacts_root: str | None = None, user_key: str | None = None) -> dict[str, Any]:
     if not folders:
         raise DocumentDeletionValidationError("At least one folder is required.")
 
     config = load_app_config(config_path)
+    if artifacts_root:
+        config = {**config, "paths": {**config["paths"], "artifacts_root": str(artifacts_root)}}
+    config = patch_config_for_user(config, user_key or "")
     artifacts_root = config["paths"]["artifacts_root"]
     unique_folders = list(dict.fromkeys(str(folder).strip() for folder in folders if str(folder).strip()))
     if not unique_folders:
@@ -310,16 +331,26 @@ def delete_documents(config_path: str | Path, folders: list[str]) -> dict[str, A
         raise
 
 
-def inspect_same_name_document(config_path: str | Path, file_name: str) -> dict[str, Any] | None:
+def inspect_same_name_document(config_path: str | Path, file_name: str, artifacts_root: str | None = None) -> dict[str, Any] | None:
     config = load_app_config(config_path)
+    if artifacts_root:
+        config = {**config, "paths": {**config["paths"], "artifacts_root": str(artifacts_root)}}
     existing_folder = find_latest_same_name_document(config["paths"]["artifacts_root"], file_name)
     if existing_folder is None:
         return None
     return load_metadata(existing_folder)
 
 
-def _run_pipeline_from_metadata(config_path: str | Path, document_folder: str | Path) -> dict[str, Any]:
+def _run_pipeline_from_metadata(
+    config_path: str | Path,
+    document_folder: str | Path,
+    artifacts_root: str | None = None,
+    user_key: str | None = None,
+) -> dict[str, Any]:
     config = load_app_config(config_path)
+    if artifacts_root:
+        config = {**config, "paths": {**config["paths"], "artifacts_root": str(artifacts_root)}}
+    config = patch_config_for_user(config, user_key or "")
     metadata = load_metadata(document_folder)
     document_id = metadata.get("document_id", "")
     start_ts = _log_workflow_enter("pipeline", "_run_pipeline_from_metadata", document_id)
@@ -386,7 +417,7 @@ def _run_pipeline_from_metadata(config_path: str | Path, document_folder: str | 
                 result_metadata = final_metadata
 
         if start_summary_after_unlock:
-            start_summarization_background(config_path, document_folder)
+            start_summarization_background(config_path, document_folder, artifacts_root=artifacts_root, user_key=user_key)
         _log_workflow_exit(
             start_ts,
             "pipeline",
@@ -405,10 +436,14 @@ def prepare_document(
     file_name: str,
     file_bytes: bytes,
     user_choice: str,
+    artifacts_root: str | None = None,
+    user_key: str | None = None,
 ) -> dict[str, Any]:
     start_ts = _log_workflow_enter("ingestion", "prepare_document", "")
     doc_id = ""
     config = load_app_config(config_path)
+    if artifacts_root:
+        config = {**config, "paths": {**config["paths"], "artifacts_root": str(artifacts_root)}}
     artifacts_root = config["paths"]["artifacts_root"]
     ensure_directory(artifacts_root)
     existing_folder = find_latest_same_name_document(artifacts_root, file_name)
@@ -419,13 +454,13 @@ def prepare_document(
         doc_id = existing_metadata.get("document_id", "")
         if existing_metadata.get("ready_to_chat") and user_choice == "reuse":
             if not existing_metadata.get("summary_ready"):
-                result = _run_pipeline_from_metadata(config_path, existing_folder)
+                result = _run_pipeline_from_metadata(config_path, existing_folder, artifacts_root, user_key=user_key)
                 _log_workflow_exit(start_ts, "ingestion", "prepare_document", result.get("document_id", doc_id), "ok")
                 return result
             _log_workflow_exit(start_ts, "ingestion", "prepare_document", doc_id, "ok")
             return existing_metadata
         if not existing_metadata.get("ready_to_chat"):
-            result = _run_pipeline_from_metadata(config_path, existing_folder)
+            result = _run_pipeline_from_metadata(config_path, existing_folder, artifacts_root, user_key=user_key)
             _log_workflow_exit(start_ts, "ingestion", "prepare_document", result.get("document_id", doc_id), "ok")
             return result
         version = int(existing_metadata["document_version"]) + 1
@@ -437,7 +472,7 @@ def prepare_document(
             artifacts_root=artifacts_root,
             version=version,
         )
-        result = _run_pipeline_from_metadata(config_path, document_folder)
+        result = _run_pipeline_from_metadata(config_path, document_folder, artifacts_root, user_key=user_key)
         _log_workflow_exit(start_ts, "ingestion", "prepare_document", result.get("document_id", doc_id), "ok")
         return result
     except Exception:
@@ -449,6 +484,8 @@ def prepare_url_document(
     config_path: str | Path,
     url: str,
     user_choice: str,
+    artifacts_root: str | None = None,
+    user_key: str | None = None,
 ) -> dict[str, Any]:
     from urllib.parse import urlparse as _urlparse
 
@@ -456,6 +493,8 @@ def prepare_url_document(
     doc_id = ""
     document_name = url_ingest.url_to_document_name(url)
     config = load_app_config(config_path)
+    if artifacts_root:
+        config = {**config, "paths": {**config["paths"], "artifacts_root": str(artifacts_root)}}
     artifacts_root = config["paths"]["artifacts_root"]
     ensure_directory(artifacts_root)
     existing_folder = find_latest_same_name_document(artifacts_root, document_name)
@@ -466,13 +505,13 @@ def prepare_url_document(
         doc_id = existing_metadata.get("document_id", "")
         if existing_metadata.get("ready_to_chat") and user_choice == "reuse":
             if not existing_metadata.get("summary_ready"):
-                result = _run_pipeline_from_metadata(config_path, existing_folder)
+                result = _run_pipeline_from_metadata(config_path, existing_folder, artifacts_root, user_key=user_key)
                 _log_workflow_exit(start_ts, "ingestion", "prepare_url_document", result.get("document_id", doc_id), "ok")
                 return result
             _log_workflow_exit(start_ts, "ingestion", "prepare_url_document", doc_id, "ok")
             return existing_metadata
         if not existing_metadata.get("ready_to_chat"):
-            result = _run_pipeline_from_metadata(config_path, existing_folder)
+            result = _run_pipeline_from_metadata(config_path, existing_folder, artifacts_root, user_key=user_key)
             _log_workflow_exit(start_ts, "ingestion", "prepare_url_document", result.get("document_id", doc_id), "ok")
             return result
 
@@ -484,7 +523,7 @@ def prepare_url_document(
             file_name = path_segment or "document.pdf"
             if not file_name.lower().endswith(".pdf"):
                 file_name += ".pdf"
-            result = prepare_document(config_path, file_name, body_bytes, user_choice)
+            result = prepare_document(config_path, file_name, body_bytes, user_choice, artifacts_root, user_key=user_key)
             _log_workflow_exit(start_ts, "ingestion", "prepare_url_document", result.get("document_id", doc_id), "ok")
             return result
         except Exception:
@@ -506,7 +545,7 @@ def prepare_url_document(
             source_url=url,
             version=version,
         )
-        result = _run_pipeline_from_metadata(config_path, document_folder)
+        result = _run_pipeline_from_metadata(config_path, document_folder, artifacts_root, user_key=user_key)
         _log_workflow_exit(start_ts, "ingestion", "prepare_url_document", result.get("document_id", doc_id), "ok")
         return result
     except Exception:
@@ -514,12 +553,22 @@ def prepare_url_document(
         raise
 
 
-def load_document(document_folder: str | Path) -> dict[str, Any]:
+def load_document(document_folder: str | Path, artifacts_root: str | None = None) -> dict[str, Any]:
+    if artifacts_root:
+        document_folder = _require_folder_in_root(document_folder, artifacts_root)
     return load_metadata(document_folder)
 
 
-def find_relevant_documents(config_path: str | Path, question: str) -> list[dict[str, Any]]:
+def find_relevant_documents(
+    config_path: str | Path,
+    question: str,
+    artifacts_root: str | None = None,
+    user_key: str | None = None,
+) -> list[dict[str, Any]]:
     config = load_app_config(config_path)
+    if artifacts_root:
+        config = {**config, "paths": {**config["paths"], "artifacts_root": str(artifacts_root)}}
+    config = patch_config_for_user(config, user_key or "")
     return multi_doc_query.find_relevant_documents(question, config)
 
 
@@ -527,21 +576,32 @@ def ask_multi_document_question(
     config_path: str | Path,
     document_folders: list[str],
     question: str,
+    artifacts_root: str | None = None,
+    user_key: str | None = None,
 ) -> dict[str, Any]:
     config = load_app_config(config_path)
+    if artifacts_root:
+        config = {**config, "paths": {**config["paths"], "artifacts_root": str(artifacts_root)}}
+        document_folders = [_require_folder_in_root(folder, artifacts_root) for folder in document_folders]
+    config = patch_config_for_user(config, user_key or "")
     return multi_doc_query.ask_across_documents(question, document_folders, config)
 
 
 # Concurrency boundary: spawns a daemon thread + calls update_summary_progress.
 # Do not refactor thread ownership here until core/job_store.py is in place (Phase B).
-def start_summarization_background(config_path: str | Path, document_folder: str | Path) -> None:
+def start_summarization_background(config_path: str | Path, document_folder: str | Path, artifacts_root: str | None = None, user_key: str | None = None) -> None:
     """Non-blocking: marks in_progress and spawns a daemon thread for summarization."""
 
+    if artifacts_root:
+        document_folder = _require_folder_in_root(document_folder, artifacts_root)
     metadata = load_metadata(document_folder)
     document_id = metadata.get("document_id", "")
     start_ts = _log_workflow_enter("summary", "start_summarization_background", document_id)
     try:
         config = load_app_config(config_path)
+        if artifacts_root:
+            config = {**config, "paths": {**config["paths"], "artifacts_root": str(artifacts_root)}}
+        config = patch_config_for_user(config, user_key or "")
         update_summary_progress(document_folder, "started", True)
 
         def _run() -> None:
@@ -563,18 +623,23 @@ def start_summarization_background(config_path: str | Path, document_folder: str
         raise
 
 
-def start_summary_watcher(config_path: str | Path) -> None:
+def start_summary_watcher(config_path: str | Path, artifacts_root: str | None = None, user_key: str | None = None) -> None:
     config = load_app_config(config_path)
+    if artifacts_root:
+        config = {**config, "paths": {**config["paths"], "artifacts_root": str(artifacts_root)}}
+    config = patch_config_for_user(config, user_key or "")
     summary_watcher.start(config)
 
 
-def reset_summary_level(config_path: str | Path, document_folder: str | Path, level: str) -> None:
+def reset_summary_level(config_path: str | Path, document_folder: str | Path, level: str, artifacts_root: str | None = None, user_key: str | None = None) -> None:
     """Clear checkpoints for *level* and all downstream levels, then restart summarization.
 
     level: "level1" | "level2" | "level3"
     Regenerating a level invalidates everything that was derived from it.
     """
 
+    if artifacts_root:
+        document_folder = _require_folder_in_root(document_folder, artifacts_root)
     folder = Path(document_folder)
     metadata = load_metadata(folder)
     document_id = metadata.get("document_id", "")
@@ -597,15 +662,25 @@ def reset_summary_level(config_path: str | Path, document_folder: str | Path, le
         if level == "level3":
             write_json(folder / "summaries" / "level3_detailed.json", {"sections": []})
 
-        start_summarization_background(config_path, folder)
+        start_summarization_background(config_path, folder, artifacts_root=artifacts_root, user_key=user_key)
         _log_workflow_exit(start_ts, "summary", "reset_summary_level", document_id, "ok")
     except Exception:
         _log_workflow_exit(start_ts, "summary", "reset_summary_level", document_id, "error")
         raise
 
 
-def ask_question(config_path: str | Path, document_folder: str | Path, question: str) -> dict[str, Any]:
+def ask_question(
+    config_path: str | Path,
+    document_folder: str | Path,
+    question: str,
+    artifacts_root: str | None = None,
+    user_key: str | None = None,
+) -> dict[str, Any]:
     config = load_app_config(config_path)
+    if artifacts_root:
+        config = {**config, "paths": {**config["paths"], "artifacts_root": str(artifacts_root)}}
+        document_folder = _require_folder_in_root(document_folder, artifacts_root)
+    config = patch_config_for_user(config, user_key or "")
     metadata = load_metadata(document_folder)
     document_id = metadata.get("document_id", "")
     start_ts = _log_workflow_enter("qa", "ask_question", document_id)

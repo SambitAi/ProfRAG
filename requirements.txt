@@ -18,3 +18,5 @@ llama-index-llms-azure-openai
 google-auth
 google-genai
 FlagEmbedding
+argon2-cffi
+PyJWT
